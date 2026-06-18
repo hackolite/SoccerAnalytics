@@ -15,6 +15,69 @@ from minimap import MiniMap
 VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv')
 
 
+def assign_team_player_ids(tracks):
+    """Assign stable per-team IDs (1-11) to each player and compute nearest teammate ID.
+
+    Each team gets its own ID counter that resets from 1.  The mapping is built
+    in first-appearance order and kept consistent across all frames.  Two new
+    keys are added to every player entry:
+      - 'team_player_id'     : int 1-11 (per-team sequential ID)
+      - 'nearest_teammate_id': int 1-11 of the spatially closest teammate, or None
+    """
+    # Build stable per-team ID mapping {original_track_id: team_local_id}
+    team_player_id_map = {}
+    team_counters = {1: 0, 2: 0}
+
+    for player_track in tracks['players']:
+        for player_id, player_info in player_track.items():
+            if player_id in team_player_id_map:
+                continue
+            team = player_info.get('team')
+            if team not in team_counters:
+                continue
+            if team_counters[team] >= 11:
+                continue
+            team_counters[team] += 1
+            team_player_id_map[player_id] = team_counters[team]
+
+    # Apply IDs and compute nearest teammate for every frame
+    for frame_num, player_track in enumerate(tracks['players']):
+        # Build per-team lookup: {team: [(player_id, tpid, pos), ...]}
+        team_groups = {}
+        for player_id, player_info in player_track.items():
+            team = player_info.get('team')
+            tpid = team_player_id_map.get(player_id)
+            if team is None or tpid is None:
+                continue
+            pos = player_info.get('position_adjusted') or player_info.get('position')
+            if pos is None:
+                continue
+            team_groups.setdefault(team, []).append((player_id, tpid, pos))
+
+        for player_id, player_info in player_track.items():
+            tpid = team_player_id_map.get(player_id)
+            if tpid is None:
+                continue
+            tracks['players'][frame_num][player_id]['team_player_id'] = tpid
+
+            team = player_info.get('team')
+            pos = player_info.get('position_adjusted') or player_info.get('position')
+            teammates = team_groups.get(team, [])
+
+            nearest_tpid = None
+            if pos is not None and len(teammates) >= 2:
+                min_dist = float('inf')
+                for tid, t_tpid, t_pos in teammates:
+                    if tid == player_id:
+                        continue
+                    dist = ((pos[0] - t_pos[0]) ** 2 + (pos[1] - t_pos[1]) ** 2) ** 0.5
+                    if dist < min_dist:
+                        min_dist = dist
+                        nearest_tpid = t_tpid
+
+            tracks['players'][frame_num][player_id]['nearest_teammate_id'] = nearest_tpid
+
+
 def process_video(video_path, tracker):
     video_name = os.path.splitext(os.path.basename(video_path))[0]
     output_path = os.path.join('output_videos', os.path.basename(video_path))
@@ -77,6 +140,9 @@ def process_video(video_path, tracker):
             tracks['players'][frame_num][player_id]['team'] = team
             tracks['players'][frame_num][player_id]['team_color'] = team_assigner.team_colors[team]
     print(f"        -> Teams assigned.")
+
+    # Assign per-team IDs (1-11) and nearest teammate ID
+    assign_team_player_ids(tracks)
 
     # Assign Ball Acquisition
     print(f"  [8/8] Assigning ball possession per frame...")
