@@ -143,7 +143,7 @@ class Tracker:
                           cv2.FILLED)
             
             x1_text = x1_rect+12
-            if track_id > 99:
+            if len(str(track_id)) > 2:
                 x1_text -=10
             
             cv2.putText(

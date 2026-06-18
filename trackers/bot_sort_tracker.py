@@ -165,6 +165,12 @@ class FootballBotSortTracker:
     ABS_MAX_SPEED: float = 80.0
     # Number of recent embeddings averaged to form the appearance gallery
     GALLERY_SIZE: int = 10
+    # Minimum composite score to re-identify a lost player instead of creating
+    # a new stable ID.  Score formula: 0.6*appearance + 0.3*motion + 0.1*iou.
+    REID_MATCH_THRESHOLD: float = 0.35
+    # Hard cap: 11 players × 2 teams.  A 23rd stable ID is never minted;
+    # detections beyond this limit are force-assigned to the best history match.
+    MAX_STABLE_IDS: int = 22
 
     def __init__(
         self,
@@ -176,10 +182,15 @@ class FootballBotSortTracker:
         self.config_path = config_path
         self.reid = ReIDExtractor(device=reid_device)
 
-        # player_history[track_id] -> TrackHistory
+        # player_history[stable_id] -> TrackHistory
         self.player_history: Dict[int, TrackHistory] = {}
         # Chronological list of suspected ID-switch events
         self._id_switch_log: List[dict] = []
+
+        # Maps raw BoT-SORT track IDs → stable per-video player IDs
+        self._id_map: Dict[int, int] = {}
+        # Counter for the next stable player ID to assign
+        self._next_stable_id: int = 1
 
     # ── History helpers ───────────────────────────────────────────────────────
 
@@ -423,6 +434,12 @@ class FootballBotSortTracker:
             print("    [get_object_tracks] Stub loaded.")
             return tracks
 
+        # Reset all per-video tracking state so successive videos are independent
+        self._id_map = {}
+        self._next_stable_id = 1
+        self.player_history = {}
+        self._id_switch_log = []
+
         print(
             f"    [get_object_tracks] No stub — running BoT-SORT on "
             f"{len(frames)} frames …"
@@ -442,6 +459,10 @@ class FootballBotSortTracker:
             if det.boxes is None:
                 continue
 
+            # Stable IDs claimed so far in this frame (prevents two raw IDs
+            # from both re-identifying the same lost player).
+            current_stable_ids: set = set()
+
             for box in det.boxes:
                 bbox = box.xyxy[0].tolist()
                 cls_id = int(box.cls[0])
@@ -452,16 +473,81 @@ class FootballBotSortTracker:
                     cls_id = cls_names_inv.get('player', cls_id)
                     cls_name = 'player'
 
-                track_id = int(box.id[0]) if box.id is not None else -1
+                raw_id = int(box.id[0]) if box.id is not None else -1
 
-                if cls_name == 'player' and track_id >= 0:
-                    tracks["players"][frame_num][track_id] = {"bbox": bbox}
-                elif cls_name == 'referee' and track_id >= 0:
-                    tracks["referees"][frame_num][track_id] = {"bbox": bbox}
+                if cls_name == 'player' and raw_id >= 0:
+                    if raw_id in self._id_map:
+                        stable_id = self._id_map[raw_id]
+                        # Guard: if this stable_id was already claimed this frame
+                        # by a different raw ID, try to find another free slot
+                        # without exceeding the cap.
+                        if stable_id in current_stable_ids:
+                            if self._next_stable_id <= self.MAX_STABLE_IDS:
+                                stable_id = self._next_stable_id
+                                self._next_stable_id += 1
+                            else:
+                                stable_id = self.MAX_STABLE_IDS
+                            self._id_map[raw_id] = stable_id
+                    else:
+                        # New raw ID — try to re-identify a lost player from
+                        # the appearance / position history.
+                        lost_tracks = {
+                            sid: hist
+                            for sid, hist in self.player_history.items()
+                            if sid not in current_stable_ids
+                            and hist.bbox is not None
+                        }
+
+                        cap_reached = self._next_stable_id > self.MAX_STABLE_IDS
+
+                        if lost_tracks:
+                            crop = self._extract_crop(frames[frame_num], bbox)
+                            emb = self.reid.extract(crop)
+                            best_id, best_score = self.match_player(
+                                bbox, emb, lost_tracks
+                            )
+                        else:
+                            best_id, best_score = None, -1.0
+
+                        if best_id is not None and (
+                            best_score >= self.REID_MATCH_THRESHOLD or cap_reached
+                        ):
+                            stable_id = best_id
+                            if cap_reached and best_score < self.REID_MATCH_THRESHOLD:
+                                logger.warning(
+                                    "ID cap reached — force re-id: "
+                                    "raw=%d → stable=%d (score=%.3f)",
+                                    raw_id, stable_id, best_score,
+                                )
+                            else:
+                                logger.info(
+                                    "Re-identified lost player: "
+                                    "raw=%d → stable=%d (score=%.3f)",
+                                    raw_id, stable_id, best_score,
+                                )
+                        elif cap_reached:
+                            # No history at all and cap reached — clamp to last ID
+                            stable_id = self.MAX_STABLE_IDS
+                            logger.warning(
+                                "ID cap reached with no history — "
+                                "clamping raw=%d to stable=%d",
+                                raw_id, stable_id,
+                            )
+                        else:
+                            stable_id = self._next_stable_id
+                            self._next_stable_id += 1
+
+                        self._id_map[raw_id] = stable_id
+
+                    current_stable_ids.add(stable_id)
+                    tracks["players"][frame_num][stable_id] = {"bbox": bbox}
+
+                elif cls_name == 'referee' and raw_id >= 0:
+                    tracks["referees"][frame_num][raw_id] = {"bbox": bbox}
                 elif cls_name == 'ball':
                     tracks["ball"][frame_num][1] = {"bbox": bbox}
 
-            # Update ReID history for every tracked player in this frame
+            # Update ReID / position history using stable IDs
             self._update_history(
                 frame_num,
                 frames[frame_num],
@@ -550,7 +636,7 @@ class FootballBotSortTracker:
                 color,
                 cv2.FILLED,
             )
-            x1t = x1r + 12 - (10 if track_id > 99 else 0)
+            x1t = x1r + 12 - (10 if len(str(track_id)) > 2 else 0)
             cv2.putText(
                 frame,
                 f"{track_id}",
@@ -675,7 +761,8 @@ class FootballBotSortTracker:
 
             for track_id, player in player_dict.items():
                 color = player.get("team_color", (0, 0, 255))
-                frame = self.draw_ellipse(frame, player["bbox"], color, track_id)
+                display_id = player.get('team_player_id', track_id)
+                frame = self.draw_ellipse(frame, player["bbox"], color, display_id)
                 if player.get('has_ball', False):
                     frame = self.draw_traingle(frame, player["bbox"], (0, 0, 255))
 

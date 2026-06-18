@@ -16,15 +16,18 @@ VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv')
 
 
 def assign_team_player_ids(tracks):
-    """Assign stable per-team IDs (1-11) to each player and compute nearest teammate ID.
+    """Assign stable per-team IDs to each player and compute nearest teammate ID.
 
-    Each team gets its own ID counter that resets from 1.  The mapping is built
-    in first-appearance order and kept consistent across all frames.  Two new
-    keys are added to every player entry:
-      - 'team_player_id'     : int 1-11 (per-team sequential ID)
-      - 'nearest_teammate_id': int 1-11 of the spatially closest teammate, or None
+    Each team gets its own ID counter that resets from 1, with a letter prefix:
+    team 1 → 'a1' … 'a11', team 2 → 'b1' … 'b11'.  The mapping is built in
+    first-appearance order and kept consistent across all frames.  Two new keys
+    are added to every player entry:
+      - 'team_player_id'     : str 'a1'-'a11' or 'b1'-'b11'
+      - 'nearest_teammate_id': str of the spatially closest teammate, or None
     """
-    # Build stable per-team ID mapping {original_track_id: team_local_id}
+    TEAM_PREFIX = {1: 'a', 2: 'b'}
+
+    # Build stable per-team ID mapping {original_track_id: prefixed_id}
     team_player_id_map = {}
     team_counters = {1: 0, 2: 0}
 
@@ -38,7 +41,8 @@ def assign_team_player_ids(tracks):
             if team_counters[team] >= 11:
                 continue
             team_counters[team] += 1
-            team_player_id_map[player_id] = team_counters[team]
+            prefix = TEAM_PREFIX.get(team, str(team))
+            team_player_id_map[player_id] = f"{prefix}{team_counters[team]}"
 
     # Apply IDs and compute nearest teammate for every frame
     for frame_num, player_track in enumerate(tracks['players']):
