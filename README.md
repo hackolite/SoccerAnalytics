@@ -17,6 +17,7 @@ distance, and assigns team possession — all from a single input video.
 | **Camera Movement** | Compensates for camera pan/tilt using Lucas-Kanade optical flow |
 | **Perspective Transform** | Maps pixel coordinates to real-world metres using a homography |
 | **Speed & Distance** | Computes each player's speed (km/h) and total distance covered (m) |
+| **Player Interaction Graph** | Draws proximity lines between nearest teammates for each team, showing tactical structure in real time |
 | **Annotated Output** | Produces a fully annotated output video with overlays for all metrics |
 
 ---
@@ -84,13 +85,68 @@ pip install -r requirements.txt
 2. Place your input video at `input_videos/trimmed_live.mp4`  
    *(or update the path in `main.py`)*.
 
-### 4 — Run the pipeline
+### 4 — Run the full analysis pipeline
 
 ```bash
 python main.py
 ```
 
 The annotated video will be saved to `output_videos/trimmed_live.mp4`.
+
+### 5 — Run standalone video inference (raw YOLO only)
+
+If you only want to run the YOLO detector on a video without the full
+tracking/analytics pipeline, use `yolo_inference.py`:
+
+```bash
+python yolo_inference.py
+```
+
+By default it runs on `input_videos/08fd33_4.mp4`.  To use a different
+source, edit the `model.predict(...)` call at the top of the file.
+
+The script prints each detected bounding box and, because `save=True` is set,
+Ultralytics also writes an annotated copy to `runs/detect/predict/`.
+
+---
+
+## Output Video
+
+Running `main.py` produces a fully annotated video at
+`output_videos/trimmed_live.mp4`.  Each frame contains:
+
+| Annotation | Visual |
+|---|---|
+| **Player ground cursor** | Coloured ellipse at the feet of every player, coloured by team; player ID shown inside a small rectangle |
+| **Ball triangle** | Green upward-pointing triangle above the ball |
+| **Ball-holder indicator** | Red upward-pointing triangle above the player currently in possession |
+| **Player interaction graph** | Semi-transparent lines connecting each player to their two nearest teammates, one graph per team rendered in the team's colour |
+| **Ball possession overlay** | Bottom-right panel showing cumulative ball-control percentage for each team |
+| **Camera movement overlay** | Top-left readout of estimated camera pan/tilt in pixels per frame |
+| **Speed & distance overlay** | Per-player speed (km/h) and cumulative distance (m) rendered near each player |
+
+Example output frame (Team 1 = blue cursors / graph, Team 2 = red cursors / graph):
+
+```
+┌──────────────────────────────────────────────────────┐
+│   [cam dx: 2  dy: -1]                                │
+│                                                      │
+│     ●━━━●    ▲(ball)                                 │
+│    ╱     ╲                                           │
+│   ●       ●━━●                                       │
+│                                                      │
+│   ○━━━○    ▲(ball-holder indicator)                  │
+│    ╲  ╱                                              │
+│     ○                                                │
+│                                  ┌─────────────────┐ │
+│                                  │Team 1 ctrl: 58% │ │
+│                                  │Team 2 ctrl: 42% │ │
+│                                  └─────────────────┘ │
+└──────────────────────────────────────────────────────┘
+  ● = Team 1 player (blue ellipse + graph)
+  ○ = Team 2 player (red ellipse + graph)
+  ▲ = triangle cursor
+```
 
 ---
 
@@ -105,12 +161,11 @@ in `main.py`.
 
 ### Standalone inference
 
-```bash
-python yolo_inference.py
-```
-
-Runs raw YOLOv8 inference on `input_videos/08fd33_4.mp4` and prints detected
-bounding boxes.
+See **Step 5** in [Getting Started](#getting-started) for the quick-start
+command.  Additional detail: `yolo_inference.py` calls
+`model.predict(..., save=True)`, which writes the annotated clip to
+`runs/detect/predict/` via Ultralytics' built-in export, and also prints
+every detected bounding box to stdout.
 
 ### Training a custom model
 
