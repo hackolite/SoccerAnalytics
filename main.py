@@ -75,7 +75,7 @@ def process_video(video_path, tracker):
             tracks['players'][frame_num][assigned_player]['has_ball'] = True
             team_ball_control.append(tracks['players'][frame_num][assigned_player]['team'])
         else:
-            team_ball_control.append(team_ball_control[-1])
+            team_ball_control.append(team_ball_control[-1] if team_ball_control else 0)
     team_ball_control = np.array(team_ball_control)
 
     # Draw output
