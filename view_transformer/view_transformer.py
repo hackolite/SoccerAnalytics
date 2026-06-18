@@ -34,6 +34,7 @@ class ViewTransformer():
         return tranform_point.reshape(-1,2)
 
     def add_transformed_position_to_tracks(self,tracks):
+        print(f"    [ViewTransformer] Transforming positions to real-world coordinates...")
         for object, object_tracks in tracks.items():
             for frame_num, track in enumerate(object_tracks):
                 for track_id, track_info in track.items():

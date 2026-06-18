@@ -9,6 +9,7 @@ class SpeedAndDistance_Estimator():
         self.frame_rate=24
     
     def add_speed_and_distance_to_tracks(self,tracks):
+        print(f"    [SpeedAndDistance_Estimator] Computing speed and distance for players...")
         total_distance= {}
 
         for object, object_tracks in tracks.items():

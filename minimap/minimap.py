@@ -165,6 +165,7 @@ class MiniMap:
         players_all = tracks.get("players", [])
         referees_all = tracks.get("referees", [])
         ball_all = tracks.get("ball", [])
+        print(f"    [MiniMap] Drawing minimap on {len(frames)} frames...")
 
         for frame_num, frame in enumerate(frames):
             players = players_all[frame_num] if frame_num < len(players_all) else {}
@@ -172,4 +173,5 @@ class MiniMap:
             ball = ball_all[frame_num] if frame_num < len(ball_all) else {}
             self.draw_frame_minimap(frame, players, referees, ball)
 
+        print(f"    [MiniMap] Minimap drawn on all frames.")
         return frames

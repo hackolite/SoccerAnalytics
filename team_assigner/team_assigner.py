@@ -40,7 +40,7 @@ class TeamAssigner:
 
 
     def assign_team_color(self,frame, player_detections):
-        
+        print(f"    [TeamAssigner] Assigning team colors from {len(player_detections)} player(s) in frame 0...")
         player_colors = []
         for _, player_detection in player_detections.items():
             bbox = player_detection["bbox"]
@@ -54,6 +54,7 @@ class TeamAssigner:
 
         self.team_colors[1] = kmeans.cluster_centers_[0]
         self.team_colors[2] = kmeans.cluster_centers_[1]
+        print(f"    [TeamAssigner] Team colors set: team1={self.team_colors[1]}, team2={self.team_colors[2]}")
 
 
     def get_player_team(self,frame,player_bbox,player_id):

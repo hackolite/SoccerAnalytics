@@ -30,6 +30,7 @@ class CameraMovementEstimator():
         )
 
     def add_adjust_positions_to_tracks(self,tracks, camera_movement_per_frame):
+        print(f"    [CameraMovementEstimator] Adjusting track positions for camera movement...")
         for object, object_tracks in tracks.items():
             for frame_num, track in enumerate(object_tracks):
                 for track_id, track_info in track.items():
@@ -43,9 +44,11 @@ class CameraMovementEstimator():
     def get_camera_movement(self,frames,read_from_stub=False, stub_path=None):
         # Read the stub 
         if read_from_stub and stub_path is not None and os.path.exists(stub_path):
+            print(f"    [CameraMovementEstimator] Loading camera movement from stub: '{stub_path}'")
             with open(stub_path,'rb') as f:
                 return pickle.load(f)
 
+        print(f"    [CameraMovementEstimator] Computing camera movement for {len(frames)} frames...")
         camera_movement = [[0,0]]*len(frames)
 
         old_gray = cv2.cvtColor(frames[0],cv2.COLOR_BGR2GRAY)
@@ -74,8 +77,10 @@ class CameraMovementEstimator():
             old_gray = frame_gray.copy()
         
         if stub_path is not None:
+            print(f"    [CameraMovementEstimator] Saving camera movement to stub: '{stub_path}'")
             with open(stub_path,'wb') as f:
                 pickle.dump(camera_movement,f)
+            print(f"    [CameraMovementEstimator] Stub saved.")
 
         return camera_movement
     
