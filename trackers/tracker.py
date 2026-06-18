@@ -164,6 +164,48 @@ class Tracker:
 
         return frame
 
+    def draw_player_interaction_graph(self, frame, player_dict):
+        """Draw proximity lines between nearest teammates for each team.
+
+        For every player, a semi-transparent line is drawn to their two
+        nearest teammates using the team colour.  Lines are rendered on a
+        separate overlay and blended at 40 % opacity so they sit behind the
+        player cursors without cluttering the image.
+        """
+        team_players = {}
+        for _, player in player_dict.items():
+            team = player.get('team')
+            if team is None:
+                continue
+            if team not in team_players:
+                team_players[team] = []
+            x_center, _ = get_center_of_bbox(player['bbox'])
+            y2 = int(player['bbox'][3])
+            color = player.get('team_color', (0, 0, 255))
+            team_players[team].append({'pos': (x_center, y2), 'color': color})
+
+        overlay = frame.copy()
+        k_neighbors = 2  # lines to k nearest teammates
+
+        for players in team_players.values():
+            if len(players) < 2:
+                continue
+            positions = np.array([p['pos'] for p in players], dtype=np.float32)
+            color = players[0]['color']
+
+            for i in range(len(players)):
+                diffs = positions - positions[i]
+                dists = np.sqrt((diffs ** 2).sum(axis=1))
+                dists[i] = np.inf  # exclude self
+                nearest_indices = np.argsort(dists)[:k_neighbors]
+                pt1 = tuple(map(int, positions[i]))
+                for j in nearest_indices:
+                    pt2 = tuple(map(int, positions[j]))
+                    cv2.line(overlay, pt1, pt2, color, 2, lineType=cv2.LINE_AA)
+
+        cv2.addWeighted(overlay, 0.4, frame, 0.6, 0, frame)
+        return frame
+
     def draw_team_ball_control(self,frame,frame_num,team_ball_control):
         # Draw a semi-transparent rectaggle 
         overlay = frame.copy()
@@ -191,6 +233,9 @@ class Tracker:
             player_dict = tracks["players"][frame_num]
             ball_dict = tracks["ball"][frame_num]
             referee_dict = tracks["referees"][frame_num]
+
+            # Draw player interaction graph (before ellipses so lines sit behind)
+            frame = self.draw_player_interaction_graph(frame, player_dict)
 
             # Draw Players
             for track_id, player in player_dict.items():
