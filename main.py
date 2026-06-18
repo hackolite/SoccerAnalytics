@@ -14,7 +14,7 @@ def main():
     video_frames = read_video('input_videos/trimmed_live.mp4')
 
     # Initialize Tracker
-    tracker = Tracker('models/best.pt')
+    tracker = Tracker('models/soccer.onnx')
 
     tracks = tracker.get_object_tracks(video_frames,
                                        read_from_stub=True,
