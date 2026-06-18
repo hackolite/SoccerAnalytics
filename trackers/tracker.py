@@ -184,12 +184,16 @@ class Tracker:
             team = player.get('team')
             if team is None:
                 continue
+            # Only include players that received a pool ID (a1-a11 / b1-b11).
+            # Players without one would leak raw tracker IDs into the graph.
+            tpid = player.get('team_player_id')
+            if tpid is None:
+                continue
             if team not in team_players:
                 team_players[team] = []
             x_center, _ = get_center_of_bbox(player['bbox'])
             y2 = int(player['bbox'][3])
             color = player.get('team_color', (0, 0, 255))
-            tpid = player.get('team_player_id', pid)
             nearest = player.get('nearest_teammate_id')
             team_players[team].append({
                 'pid': pid,
@@ -264,7 +268,11 @@ class Tracker:
             # Draw Players
             for track_id, player in player_dict.items():
                 color = player.get("team_color",(0,0,255))
-                display_id = player.get('team_player_id', track_id)
+                # Only display IDs from the fixed pool (a1-a11, b1-b11).
+                # If a player has no pool ID (unknown team, or pool already full),
+                # draw the ellipse without any label rather than leaking the raw
+                # tracker ID (e.g. 227, 228).
+                display_id = player.get('team_player_id')
                 frame = self.draw_ellipse(frame, player["bbox"],color, display_id)
 
                 if player.get('has_ball',False):
