@@ -47,7 +47,30 @@ class SpeedAndDistance_Estimator():
                             continue
                         tracks[object][frame_num_batch][track_id]['speed'] = speed_km_per_hour
                         tracks[object][frame_num_batch][track_id]['distance'] = total_distance[object][track_id]
-    
+
+        # Ball distance and speed
+        print(f"    [SpeedAndDistance_Estimator] Computing speed and distance for ball...")
+        total_ball_distance = 0
+        ball_tracks = tracks.get("ball", [])
+        number_of_frames = len(ball_tracks)
+        for frame_num in range(0, number_of_frames, self.frame_window):
+            last_frame = min(frame_num + self.frame_window, number_of_frames - 1)
+            if 1 not in ball_tracks[frame_num] or 1 not in ball_tracks[last_frame]:
+                continue
+            start_position = ball_tracks[frame_num][1].get('position_transformed')
+            end_position = ball_tracks[last_frame][1].get('position_transformed')
+            if start_position is None or end_position is None:
+                continue
+            distance_covered = measure_distance(start_position, end_position)
+            time_elapsed = (last_frame - frame_num) / self.frame_rate
+            speed_km_per_hour = (distance_covered / time_elapsed) * 3.6
+            total_ball_distance += distance_covered
+            for frame_num_batch in range(frame_num, last_frame):
+                if 1 not in tracks["ball"][frame_num_batch]:
+                    continue
+                tracks["ball"][frame_num_batch][1]['speed'] = speed_km_per_hour
+                tracks["ball"][frame_num_batch][1]['distance'] = total_ball_distance
+
     def draw_speed_and_distance(self,frames,tracks):
         output_frames = []
         for frame_num, frame in enumerate(frames):
@@ -69,6 +92,27 @@ class SpeedAndDistance_Estimator():
                        position = tuple(map(int,position))
                        cv2.putText(frame, f"{speed:.2f} km/h",position,cv2.FONT_HERSHEY_SIMPLEX,0.5,(0,0,0),2)
                        cv2.putText(frame, f"{distance:.2f} m",(position[0],position[1]+20),cv2.FONT_HERSHEY_SIMPLEX,0.5,(0,0,0),2)
+
+            # Ball distance overlay (fixed HUD, top-right corner)
+            ball_tracks = tracks.get("ball", [])
+            if frame_num < len(ball_tracks):
+                ball_info = ball_tracks[frame_num].get(1, {})
+                ball_dist = ball_info.get('distance')
+                ball_speed = ball_info.get('speed')
+                if ball_dist is not None:
+                    fh, fw = frame.shape[:2]
+                    box_w, box_h = 300, 70
+                    x0 = fw - box_w - 10
+                    y0 = 10
+                    overlay = frame.copy()
+                    cv2.rectangle(overlay, (x0, y0), (x0 + box_w, y0 + box_h), (255, 255, 255), -1)
+                    cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+                    cv2.putText(frame, f"Ball dist: {ball_dist:.1f} m",
+                                (x0 + 10, y0 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+                    if ball_speed is not None:
+                        cv2.putText(frame, f"Ball speed: {ball_speed:.1f} km/h",
+                                    (x0 + 10, y0 + 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+
             output_frames.append(frame)
         
         return output_frames
