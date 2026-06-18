@@ -1,0 +1,36 @@
+# botsort_football.yaml
+# BoT-SORT configuration optimised for football match footage
+# filmed from a static tribune camera.
+#
+# Derived from the standard Ultralytics botsort.yaml with parameters
+# tuned to minimise ID switches during player crossings / occlusions.
+
+tracker_type: botsort
+
+# ── Detection confidence thresholds ──────────────────────────────────────────
+# High-confidence detections used for the first, more selective association pass
+track_high_thresh: 0.5
+# Low-confidence detections used for the second association pass (rescue step)
+track_low_thresh: 0.1
+# A new track is only initialised when its detection exceeds this threshold
+new_track_thresh: 0.6
+
+# ── Track buffer ──────────────────────────────────────────────────────────────
+# Number of frames a "lost" track is kept alive before being permanently deleted.
+# 120 frames ≈ 4 s at 30 fps — long enough to survive typical occlusions.
+track_buffer: 120
+
+# ── Association thresholds ────────────────────────────────────────────────────
+# Maximum cost allowed in the Hungarian assignment step.
+# Higher value → more permissive matching; helps in crowded football scenes.
+match_thresh: 0.85
+
+# IoU-based spatial proximity gate for second-stage matching
+proximity_thresh: 0.5
+# Cosine appearance distance gate; detections with higher distance are rejected
+appearance_thresh: 0.25
+
+# ── ReID ──────────────────────────────────────────────────────────────────────
+# Enable appearance embeddings for re-identification after occlusion.
+# Requires an Ultralytics-compatible ReID model.
+with_reid: True
