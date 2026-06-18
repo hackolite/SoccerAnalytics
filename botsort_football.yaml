@@ -30,6 +30,11 @@ proximity_thresh: 0.5
 # Cosine appearance distance gate; detections with higher distance are rejected
 appearance_thresh: 0.25
 
+# ── Global Motion Compensation ────────────────────────────────────────────────
+# Method used by BoT-SORT's GMC module to estimate camera motion.
+# Options: sparseOptFlow (default), orb, ecc, sof, none
+gmc_method: sparseOptFlow
+
 # ── ReID ──────────────────────────────────────────────────────────────────────
 # Enable appearance embeddings for re-identification after occlusion.
 # Requires an Ultralytics-compatible ReID model.
