@@ -1,5 +1,6 @@
 import os
 import glob
+import warnings
 
 from utils import read_video, save_video
 from trackers import Tracker
@@ -106,6 +107,66 @@ def assign_team_player_ids(tracks):
         if best_id is not None:
             team_player_id_map[player_id] = best_id
             recycled_ids.add(best_id)
+
+    # --- Fallback: players still without ID after recycling ---
+    # Handles: no team, no position, recycled-IDs exhausted, team not in {1,2}.
+    # Scores by combined spatial + temporal proximity from the full history.
+    # Same-team is tried first; cross-team is used when no same-team candidate
+    # exists.  Duplicates are allowed here — this is a last-resort assignment.
+    def _closest_from_history(player_id, restrict_team):
+        """Return the team_player_id of the historically closest mapped player.
+
+        Combines Euclidean spatial distance (pixels) with temporal distance
+        (frame index difference) into a single score.  Returns None when
+        *team_player_id_map* contains no eligible candidate.
+        """
+        pos = last_pos(player_id)
+        frame_idx = first_frame[player_id]
+        best_id = None
+        min_score = float('inf')
+        for existing_pid, existing_tpid in team_player_id_map.items():
+            if restrict_team is not None and player_teams.get(existing_pid) != restrict_team:
+                continue
+            existing_pos = last_pos(existing_pid)
+            existing_frame = first_frame.get(existing_pid, 0)
+            if pos is not None and existing_pos is not None:
+                spatial = ((pos[0] - existing_pos[0]) ** 2 +
+                           (pos[1] - existing_pos[1]) ** 2) ** 0.5
+            else:
+                spatial = 0.0
+            temporal = abs(frame_idx - existing_frame)
+            score = spatial + temporal
+            if score < min_score:
+                min_score = score
+                best_id = existing_tpid
+        return best_id
+
+    for player_id in sorted(first_frame, key=first_frame.__getitem__):
+        if player_id in team_player_id_map:
+            continue
+        team = player_teams.get(player_id)
+        # Prefer same-team match; fall back to any team if nothing found.
+        if team is not None:
+            best_id = _closest_from_history(player_id, restrict_team=team)
+            if best_id is None:
+                best_id = _closest_from_history(player_id, restrict_team=None)
+        else:
+            best_id = _closest_from_history(player_id, restrict_team=None)
+        if best_id is not None:
+            team_player_id_map[player_id] = best_id
+
+    # --- Rigorous invariant check ---
+    # Every tracked player MUST have a team_player_id at this point.
+    missing_ids = [pid for pid in first_frame if pid not in team_player_id_map]
+    if missing_ids:
+        warnings.warn(
+            f"assign_team_player_ids: {len(missing_ids)} player(s) still without "
+            f"a team_player_id after all assignment passes "
+            f"(first 10: {missing_ids[:10]}{'...' if len(missing_ids) > 10 else ''}). "
+            "This should not happen — check team assignment and tracking data.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     # Apply IDs and compute nearest teammate for every frame
     for frame_num, player_track in enumerate(tracks['players']):
