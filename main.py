@@ -28,7 +28,7 @@ def assign_team_player_ids(tracks):
     When the team pool is exhausted (more than 11 track IDs detected for a
     team), the extra player inherits the ID of the geographically nearest
     same-team player that already holds an ID.  The match is computed from
-    the full position history (average position across all frames) rather than
+    the full position history (last known position) rather than
     a single snapshot.  Each existing ID may be recycled at most once so that
     no two extra players receive the same ID (no-duplicate rule).
     """
@@ -51,13 +51,12 @@ def assign_team_player_ids(tracks):
             if pos is not None:
                 position_history.setdefault(player_id, []).append(pos)
 
-    def avg_pos(player_id):
-        """Return the average (x, y) position across all recorded frames."""
+    def last_pos(player_id):
+        """Return the last recorded (x, y) position."""
         hist = position_history.get(player_id)
         if not hist:
             return None
-        return (sum(p[0] for p in hist) / len(hist),
-                sum(p[1] for p in hist) / len(hist))
+        return hist[-1]
 
     # --- Assign fresh IDs to the first 11 unique players per team ---
     team_player_id_map = {}
@@ -85,7 +84,7 @@ def assign_team_player_ids(tracks):
         team = player_teams.get(player_id)
         if team is None:
             continue
-        pos = avg_pos(player_id)
+        pos = last_pos(player_id)
         if pos is None:
             continue
 
@@ -96,7 +95,7 @@ def assign_team_player_ids(tracks):
                 continue
             if existing_tpid in recycled_ids:
                 continue
-            existing_pos = avg_pos(existing_pid)
+            existing_pos = last_pos(existing_pid)
             if existing_pos is None:
                 continue
             dist = ((pos[0] - existing_pos[0]) ** 2 + (pos[1] - existing_pos[1]) ** 2) ** 0.5
