@@ -43,15 +43,21 @@ class Tracker:
         for i in range(0,len(frames),batch_size):
             detections_batch = self.model.predict(frames[i:i+batch_size],conf=0.1)
             detections += detections_batch
+            if (i // batch_size + 1) % 50 == 0:
+                print(f"    [detect_frames] {i + batch_size}/{len(frames)} frames processed.")
+        print(f"    [detect_frames] Done — {len(detections)} frames detected.")
         return detections
 
     def get_object_tracks(self, frames, read_from_stub=False, stub_path=None):
         
         if read_from_stub and stub_path is not None and os.path.exists(stub_path):
+            print(f"    [get_object_tracks] Loading tracks from stub: '{stub_path}'")
             with open(stub_path,'rb') as f:
                 tracks = pickle.load(f)
+            print(f"    [get_object_tracks] Stub loaded.")
             return tracks
 
+        print(f"    [get_object_tracks] No stub found — running detection on {len(frames)} frames...")
         detections = self.detect_frames(frames)
 
         tracks={
@@ -98,8 +104,10 @@ class Tracker:
                     tracks["ball"][frame_num][1] = {"bbox":bbox}
 
         if stub_path is not None:
+            print(f"    [get_object_tracks] Saving tracks to stub: '{stub_path}'")
             with open(stub_path,'wb') as f:
                 pickle.dump(tracks,f)
+            print(f"    [get_object_tracks] Stub saved.")
 
         return tracks
     

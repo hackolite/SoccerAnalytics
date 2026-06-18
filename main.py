@@ -24,15 +24,20 @@ def process_video(video_path, tracker):
     print(f"\n=== Processing: {video_path} ===")
 
     # Read Video
+    print(f"  [1/8] Reading video frames from '{video_path}'...")
     video_frames = read_video(video_path)
+    print(f"        -> {len(video_frames)} frames loaded.")
 
+    print(f"  [2/8] Running object tracking...")
     tracks = tracker.get_object_tracks(video_frames,
                                        read_from_stub=True,
                                        stub_path=track_stub)
     # Get object positions
     tracker.add_position_to_tracks(tracks)
+    print(f"        -> Tracking complete.")
 
     # Camera movement estimator
+    print(f"  [3/8] Estimating camera movement...")
     camera_movement_estimator = CameraMovementEstimator(video_frames[0])
     camera_movement_per_frame = camera_movement_estimator.get_camera_movement(
         video_frames,
@@ -40,19 +45,27 @@ def process_video(video_path, tracker):
         stub_path=camera_stub,
     )
     camera_movement_estimator.add_adjust_positions_to_tracks(tracks, camera_movement_per_frame)
+    print(f"        -> Camera movement estimated for {len(camera_movement_per_frame)} frames.")
 
     # View Transformer
+    print(f"  [4/8] Applying view transformation...")
     view_transformer = ViewTransformer()
     view_transformer.add_transformed_position_to_tracks(tracks)
+    print(f"        -> View transformation applied.")
 
     # Interpolate Ball Positions
+    print(f"  [5/8] Interpolating ball positions...")
     tracks["ball"] = tracker.interpolate_ball_positions(tracks["ball"])
+    print(f"        -> Ball positions interpolated.")
 
     # Speed and distance estimator
+    print(f"  [6/8] Computing speed and distance...")
     speed_and_distance_estimator = SpeedAndDistance_Estimator()
     speed_and_distance_estimator.add_speed_and_distance_to_tracks(tracks)
+    print(f"        -> Speed and distance computed.")
 
     # Assign Player Teams
+    print(f"  [7/8] Assigning player teams...")
     team_assigner = TeamAssigner()
     team_assigner.assign_team_color(video_frames[0], tracks['players'][0])
 
@@ -63,8 +76,10 @@ def process_video(video_path, tracker):
                                                  player_id)
             tracks['players'][frame_num][player_id]['team'] = team
             tracks['players'][frame_num][player_id]['team_color'] = team_assigner.team_colors[team]
+    print(f"        -> Teams assigned.")
 
     # Assign Ball Acquisition
+    print(f"  [8/8] Assigning ball possession per frame...")
     player_assigner = PlayerBallAssigner()
     team_ball_control = []
     for frame_num, player_track in enumerate(tracks['players']):
@@ -77,19 +92,25 @@ def process_video(video_path, tracker):
         else:
             team_ball_control.append(team_ball_control[-1] if team_ball_control else 0)
     team_ball_control = np.array(team_ball_control)
+    print(f"        -> Ball possession assigned for {len(team_ball_control)} frames.")
 
     # Draw output
+    print(f"  [draw] Drawing annotations...")
     output_video_frames = tracker.draw_annotations(video_frames, tracks, team_ball_control)
+    print(f"         Drawing camera movement overlay...")
     output_video_frames = camera_movement_estimator.draw_camera_movement(output_video_frames, camera_movement_per_frame)
+    print(f"         Drawing speed and distance overlay...")
     speed_and_distance_estimator.draw_speed_and_distance(output_video_frames, tracks)
-
+    print(f"         Drawing minimap overlay...")
     minimap = MiniMap()
     output_video_frames = minimap.draw_minimap(output_video_frames, tracks)
+    print(f"         All overlays drawn.")
 
     # Save video
     os.makedirs('output_videos', exist_ok=True)
+    print(f"  [save] Saving output video to '{output_path}'...")
     save_video(output_video_frames, output_path)
-    print(f"    Saved to: {output_path}")
+    print(f"         -> Saved to: {output_path}")
 
 
 def main():
