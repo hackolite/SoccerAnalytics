@@ -7,6 +7,7 @@ from player_ball_assigner import PlayerBallAssigner
 from camera_movement_estimator import CameraMovementEstimator
 from view_transformer import ViewTransformer
 from speed_and_distance_estimator import SpeedAndDistance_Estimator
+from minimap import MiniMap
 
 
 def main():
@@ -79,6 +80,10 @@ def main():
 
     ## Draw Speed and Distance
     speed_and_distance_estimator.draw_speed_and_distance(output_video_frames,tracks)
+
+    ## Draw Minimap
+    minimap = MiniMap()
+    output_video_frames = minimap.draw_minimap(output_video_frames, tracks)
 
     # Save video
     save_video(output_video_frames, 'output_videos/trimmed_live.mp4')

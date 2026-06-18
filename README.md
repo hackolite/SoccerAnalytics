@@ -18,6 +18,7 @@ distance, and assigns team possession — all from a single input video.
 | **Perspective Transform** | Maps pixel coordinates to real-world metres using a homography |
 | **Speed & Distance** | Computes each player's speed (km/h) and total distance covered (m) |
 | **Player Interaction Graph** | Draws proximity lines between nearest teammates for each team, showing tactical structure in real time |
+| **Minimap** | Top-down 2-D pitch overlay showing every player, referee and ball in real-world coordinates via homography |
 | **Annotated Output** | Produces a fully annotated output video with overlays for all metrics |
 
 ---
@@ -46,6 +47,8 @@ SoccerAnalytics/
 │   └── view_transformer.py          # Perspective transform to real-world coords
 ├── speed_and_distance_estimator/
 │   └── speed_and_distance_estimator.py
+├── minimap/
+│   └── minimap.py                   # Top-down minimap overlay (homography)
 │
 ├── models/                          # Put your trained model here (best.pt)
 ├── stubs/                           # Auto-generated pickle cache files
@@ -70,13 +73,38 @@ git clone https://github.com/hackolite/SoccerAnalytics.git
 cd SoccerAnalytics
 ```
 
-### 2 — Install dependencies
+### 2 — Create and activate a virtual environment
+
+**Option A — venv (built-in, no extra install needed)**
+
+```bash
+# Create the environment
+python -m venv .venv
+
+# Activate — Linux / macOS
+source .venv/bin/activate
+
+# Activate — Windows (cmd.exe)
+.venv\Scripts\activate.bat
+
+# Activate — Windows (PowerShell)
+.venv\Scripts\Activate.ps1
+```
+
+**Option B — conda**
+
+```bash
+conda create -n socceranalytics python=3.10
+conda activate socceranalytics
+```
+
+### 3 — Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3 — Add your model and input video
+### 4 — Add your model and input video
 
 1. Place your trained YOLOv8 model at `models/best.pt`.  
    *(See `training/football_training_yolo_v5.ipynb` to train your own, or use
@@ -85,7 +113,7 @@ pip install -r requirements.txt
 2. Place your input video at `input_videos/trimmed_live.mp4`  
    *(or update the path in `main.py`)*.
 
-### 4 — Run the full analysis pipeline
+### 5 — Run the full analysis pipeline
 
 ```bash
 python main.py
@@ -93,7 +121,7 @@ python main.py
 
 The annotated video will be saved to `output_videos/trimmed_live.mp4`.
 
-### 5 — Run standalone video inference (raw YOLO only)
+### 6 — Run standalone video inference (raw YOLO only)
 
 If you only want to run the YOLO detector on a video without the full
 tracking/analytics pipeline, use `yolo_inference.py`:
@@ -124,6 +152,7 @@ Running `main.py` produces a fully annotated video at
 | **Ball possession overlay** | Bottom-right panel showing cumulative ball-control percentage for each team |
 | **Camera movement overlay** | Top-left readout of estimated camera pan/tilt in pixels per frame |
 | **Speed & distance overlay** | Per-player speed (km/h) and cumulative distance (m) rendered near each player |
+| **Minimap** | Bottom-left corner top-down pitch view showing player/ball positions mapped via homography |
 
 Example output frame (Team 1 = blue cursors / graph, Team 2 = red cursors / graph):
 
@@ -196,6 +225,8 @@ Multi-Object Tracking (ByteTrack)
     │
     └─► Speed & Distance Estimation
     │
+    └─► Minimap Overlay (homography → top-down 2-D pitch view)
+    │
     ▼
 Annotated Output Video
 ```
@@ -206,7 +237,8 @@ Annotated Output Video
 
 - The perspective transform vertices (`view_transformer.py`) are hard-coded for
   a specific camera angle and resolution. Adjust `pixel_vertices` for your own
-  footage.
+  footage.  The minimap dimensions (`MiniMap.COURT_LENGTH` / `COURT_WIDTH`) must
+  be kept in sync with `ViewTransformer` when you change these values.
 - Player ID `91` is hard-coded to team 1 in `team_assigner.py` — remove or
   generalise this if it does not apply to your video.
 - The `draw_team_ball_control` overlay assumes a 1920 × 1080 output resolution.
