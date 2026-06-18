@@ -178,7 +178,7 @@ class FootballBotSortTracker:
         config_path: str = 'botsort_football.yaml',
         reid_device: Optional[str] = None,
     ) -> None:
-        self.model = YOLO(model_path)
+        self.model = YOLO(model_path, task='detect')
         self.config_path = config_path
         self.reid = ReIDExtractor(device=reid_device)
 
