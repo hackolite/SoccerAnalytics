@@ -24,25 +24,88 @@ def assign_team_player_ids(tracks):
     are added to every player entry:
       - 'team_player_id'     : str 'a1'-'a11' or 'b1'-'b11'
       - 'nearest_teammate_id': str of the spatially closest teammate, or None
+
+    When the team pool is exhausted (more than 11 track IDs detected for a
+    team), the extra player inherits the ID of the geographically nearest
+    same-team player that already holds an ID.  The match is computed from
+    the full position history (last known position) rather than
+    a single snapshot.  Each existing ID may be recycled at most once so that
+    no two extra players receive the same ID (no-duplicate rule).
     """
     TEAM_PREFIX = {1: 'a', 2: 'b'}
 
-    # Build stable per-team ID mapping {original_track_id: prefixed_id}
+    # --- Preliminary pass: collect team and full position history per player ---
+    player_teams = {}       # {player_id: team}
+    position_history = {}   # {player_id: [pos, ...]}
+    first_frame = {}        # {player_id: frame_index} for first-appearance ordering
+
+    for frame_num, player_track in enumerate(tracks['players']):
+        for player_id, player_info in player_track.items():
+            if player_id not in player_teams:
+                team = player_info.get('team')
+                if team is not None:
+                    player_teams[player_id] = team
+            if player_id not in first_frame:
+                first_frame[player_id] = frame_num
+            pos = player_info.get('position_adjusted') or player_info.get('position')
+            if pos is not None:
+                position_history.setdefault(player_id, []).append(pos)
+
+    def last_pos(player_id):
+        """Return the last recorded (x, y) position."""
+        hist = position_history.get(player_id)
+        if not hist:
+            return None
+        return hist[-1]
+
+    # --- Assign fresh IDs to the first 11 unique players per team ---
     team_player_id_map = {}
     team_counters = {1: 0, 2: 0}
 
-    for player_track in tracks['players']:
-        for player_id, player_info in player_track.items():
-            if player_id in team_player_id_map:
+    for player_id in sorted(first_frame, key=first_frame.__getitem__):
+        if player_id in team_player_id_map:
+            continue
+        team = player_teams.get(player_id)
+        if team not in team_counters:
+            continue
+        if team_counters[team] >= 11:
+            continue
+        team_counters[team] += 1
+        prefix = TEAM_PREFIX.get(team, str(team))
+        team_player_id_map[player_id] = f"{prefix}{team_counters[team]}"
+
+    # --- Recycle IDs for extra players using full position history ---
+    # Each existing ID may be recycled at most once (no-duplicate rule).
+    recycled_ids = set()
+
+    for player_id in sorted(first_frame, key=first_frame.__getitem__):
+        if player_id in team_player_id_map:
+            continue
+        team = player_teams.get(player_id)
+        if team is None:
+            continue
+        pos = last_pos(player_id)
+        if pos is None:
+            continue
+
+        best_id = None
+        min_dist = float('inf')
+        for existing_pid, existing_tpid in team_player_id_map.items():
+            if player_teams.get(existing_pid) != team:
                 continue
-            team = player_info.get('team')
-            if team not in team_counters:
+            if existing_tpid in recycled_ids:
                 continue
-            if team_counters[team] >= 11:
+            existing_pos = last_pos(existing_pid)
+            if existing_pos is None:
                 continue
-            team_counters[team] += 1
-            prefix = TEAM_PREFIX.get(team, str(team))
-            team_player_id_map[player_id] = f"{prefix}{team_counters[team]}"
+            dist = ((pos[0] - existing_pos[0]) ** 2 + (pos[1] - existing_pos[1]) ** 2) ** 0.5
+            if dist < min_dist:
+                min_dist = dist
+                best_id = existing_tpid
+
+        if best_id is not None:
+            team_player_id_map[player_id] = best_id
+            recycled_ids.add(best_id)
 
     # Apply IDs and compute nearest teammate for every frame
     for frame_num, player_track in enumerate(tracks['players']):
