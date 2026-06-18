@@ -479,15 +479,23 @@ class FootballBotSortTracker:
                     if raw_id in self._id_map:
                         stable_id = self._id_map[raw_id]
                         # Guard: if this stable_id was already claimed this frame
-                        # by a different raw ID, try to find another free slot
-                        # without exceeding the cap.
+                        # by a different raw ID, try to find a free slot.  When no
+                        # free slot is available (cap reached), skip this detection
+                        # entirely to avoid assigning the same ID to two players in
+                        # the same frame.
                         if stable_id in current_stable_ids:
                             if self._next_stable_id <= self.MAX_STABLE_IDS:
                                 stable_id = self._next_stable_id
                                 self._next_stable_id += 1
+                                self._id_map[raw_id] = stable_id
                             else:
-                                stable_id = self.MAX_STABLE_IDS
-                            self._id_map[raw_id] = stable_id
+                                # No free slot — omit rather than duplicate
+                                logger.warning(
+                                    "ID cap reached, duplicate suppressed: "
+                                    "raw=%d → stable=%d already in use this frame",
+                                    raw_id, stable_id,
+                                )
+                                continue
                     else:
                         # New raw ID — try to re-identify a lost player from
                         # the appearance / position history.
@@ -526,13 +534,14 @@ class FootballBotSortTracker:
                                     raw_id, stable_id, best_score,
                                 )
                         elif cap_reached:
-                            # No history at all and cap reached — clamp to last ID
-                            stable_id = self.MAX_STABLE_IDS
+                            # No re-id candidate available and cap reached.
+                            # Skip rather than duplicate an existing ID.
                             logger.warning(
-                                "ID cap reached with no history — "
-                                "clamping raw=%d to stable=%d",
-                                raw_id, stable_id,
+                                "ID cap reached with no free candidate — "
+                                "suppressing raw=%d",
+                                raw_id,
                             )
+                            continue
                         else:
                             stable_id = self._next_stable_id
                             self._next_stable_id += 1
