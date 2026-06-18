@@ -173,15 +173,14 @@ class Tracker:
         return frame
 
     def draw_player_interaction_graph(self, frame, player_dict):
-        """Draw proximity lines between nearest teammates for each team.
+        """Draw a proximity line to the nearest teammate for each player.
 
-        For every player, a semi-transparent line is drawn to their two
-        nearest teammates using the team colour.  Lines are rendered on a
-        separate overlay and blended at 40 % opacity so they sit behind the
-        player cursors without cluttering the image.
+        A semi-transparent line is drawn from each player to their single
+        nearest teammate using the team colour.  The nearest teammate's
+        team-local ID (1-11) is shown at the mid-point of the line.
         """
         team_players = {}
-        for _, player in player_dict.items():
+        for pid, player in player_dict.items():
             team = player.get('team')
             if team is None:
                 continue
@@ -190,26 +189,42 @@ class Tracker:
             x_center, _ = get_center_of_bbox(player['bbox'])
             y2 = int(player['bbox'][3])
             color = player.get('team_color', (0, 0, 255))
-            team_players[team].append({'pos': (x_center, y2), 'color': color})
+            tpid = player.get('team_player_id', pid)
+            nearest = player.get('nearest_teammate_id')
+            team_players[team].append({
+                'pid': pid,
+                'tpid': tpid,
+                'pos': (x_center, y2),
+                'color': color,
+                'nearest': nearest,
+            })
 
         overlay = frame.copy()
-        k_neighbors = 2  # lines to k nearest teammates
 
         for players in team_players.values():
             if len(players) < 2:
                 continue
-            positions = np.array([p['pos'] for p in players], dtype=np.float32)
+            # Build a map from tpid → pos for label lookup
+            tpid_to_pos = {p['tpid']: p['pos'] for p in players}
             color = players[0]['color']
 
-            for i in range(len(players)):
-                diffs = positions - positions[i]
-                dists = np.sqrt((diffs ** 2).sum(axis=1))
-                dists[i] = np.inf  # exclude self
-                nearest_indices = np.argsort(dists)[:k_neighbors]
-                pt1 = tuple(map(int, positions[i]))
-                for j in nearest_indices:
-                    pt2 = tuple(map(int, positions[j]))
-                    cv2.line(overlay, pt1, pt2, color, 2, lineType=cv2.LINE_AA)
+            drawn_pairs = set()
+            for p in players:
+                nearest_tpid = p['nearest']
+                if nearest_tpid is None or nearest_tpid not in tpid_to_pos:
+                    continue
+                pair = tuple(sorted((p['tpid'], nearest_tpid)))
+                pt1 = tuple(map(int, p['pos']))
+                pt2 = tuple(map(int, tpid_to_pos[nearest_tpid]))
+                cv2.line(overlay, pt1, pt2, color, 2, lineType=cv2.LINE_AA)
+
+                if pair not in drawn_pairs:
+                    mid = ((pt1[0] + pt2[0]) // 2, (pt1[1] + pt2[1]) // 2)
+                    cv2.putText(overlay, str(nearest_tpid), mid,
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                    cv2.putText(overlay, str(nearest_tpid), mid,
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                    drawn_pairs.add(pair)
 
         cv2.addWeighted(overlay, 0.4, frame, 0.6, 0, frame)
         return frame
@@ -249,7 +264,8 @@ class Tracker:
             # Draw Players
             for track_id, player in player_dict.items():
                 color = player.get("team_color",(0,0,255))
-                frame = self.draw_ellipse(frame, player["bbox"],color, track_id)
+                display_id = player.get('team_player_id', track_id)
+                frame = self.draw_ellipse(frame, player["bbox"],color, display_id)
 
                 if player.get('has_ball',False):
                     frame = self.draw_traingle(frame, player["bbox"],(0,0,255))
