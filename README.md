@@ -1,62 +1,180 @@
-# Football Tracking using YOLOv8 and OpenCV
+# SoccerAnalytics — Football Tracking with YOLOv8 & OpenCV
 
-This repository contains a football analysis system that leverages machine learning, computer vision, and deep learning techniques to analyze football matches. The system utilizes state-of-the-art object detection models, custom object detectors, pixel segmentation, optical flow, perspective transformation, and speed-distance measurement to provide comprehensive insights into player movements and match dynamics.
+An end-to-end football match analysis system that detects and tracks players,
+referees, and the ball, estimates camera movement, measures player speed and
+distance, and assigns team possession — all from a single input video.
+
+---
 
 ## Features
 
-1. **Object Detection with YOLOv8**: Utilizes Ultralytics and YOLOv8 to detect players, referees, and footballs in images and videos.
+| Feature | Description |
+|---|---|
+| **Object Detection** | Detects players, referees, and the ball with a fine-tuned YOLOv8 model |
+| **Multi-Object Tracking** | Maintains consistent player and referee IDs across frames via ByteTrack |
+| **Team Assignment** | Separates the two teams using KMeans clustering on shirt colours |
+| **Ball Possession** | Assigns the ball to the nearest player each frame and tracks team control |
+| **Camera Movement** | Compensates for camera pan/tilt using Lucas-Kanade optical flow |
+| **Perspective Transform** | Maps pixel coordinates to real-world metres using a homography |
+| **Speed & Distance** | Computes each player's speed (km/h) and total distance covered (m) |
+| **Annotated Output** | Produces a fully annotated output video with overlays for all metrics |
 
-2. **Custom Object Detection**: Fine-tunes and trains a custom YOLO model on a dataset tailored specifically for football analysis, enhancing object detection accuracy.
+---
 
-3. **Pixel Segmentation with KMeans**: Employs KMeans clustering to segment players from the background based on the colors of their t-shirts, providing accurate player identification.
+## Project Structure
 
-4. **Optical Flow for Camera Movement**: Implements optical flow techniques to measure camera movement between frames, ensuring precise analysis of player movements.
+```
+SoccerAnalytics/
+├── main.py                          # Entry point — orchestrates the full pipeline
+├── yolo_inference.py                # Standalone YOLO inference helper
+├── requirements.txt                 # Python dependencies
+│
+├── utils/                           # Shared utility functions
+│   ├── video_utils.py               #   read_video / save_video
+│   └── bbox_utils.py                #   bbox helpers, distance functions
+│
+├── trackers/
+│   └── tracker.py                   # YOLO detection + ByteTrack + annotation
+├── team_assigner/
+│   └── team_assigner.py             # KMeans-based team colour clustering
+├── player_ball_assigner/
+│   └── player_ball_assigner.py      # Nearest-player ball possession
+├── camera_movement_estimator/
+│   └── camera_movement_estimator.py # Optical-flow camera motion estimation
+├── view_transformer/
+│   └── view_transformer.py          # Perspective transform to real-world coords
+├── speed_and_distance_estimator/
+│   └── speed_and_distance_estimator.py
+│
+├── models/                          # Put your trained model here (best.pt)
+├── stubs/                           # Auto-generated pickle cache files
+├── input_videos/                    # Source videos
+├── output_videos/                   # Annotated output videos
+└── training/                        # YOLOv8 training notebook & dataset
+```
 
-5. **Perspective Transformation**: Utilizes OpenCV's perspective transformation to represent the scene's depth and perspective, enabling measurements of player movement in meters rather than pixels.
-
-6. **Speed and Distance Measurement**: Calculates players' speed and distance covered in the image, offering valuable insights into player performance.
+---
 
 ## Getting Started
 
-To get started with using the football analysis system, follow these steps:
+### Prerequisites
 
-1. Clone this repository to your local machine:
+- Python 3.8 or higher
+- A CUDA-capable GPU is recommended but not required
 
-    ```bash
-    git clone https://github.com/AnshChoudhary/Football-Tracking.git
-    ```
+### 1 — Clone the repository
 
-2. Install the required dependencies:
+```bash
+git clone https://github.com/hackolite/SoccerAnalytics.git
+cd SoccerAnalytics
+```
 
-    ```bash
-    pip install -r requirements.txt
-    ```
+### 2 — Install dependencies
 
-3. Run the provided scripts or integrate the system into your own project as needed.
+```bash
+pip install -r requirements.txt
+```
 
-## Usage
+### 3 — Add your model and input video
 
-The system provides various scripts and modules for different tasks:
+1. Place your trained YOLOv8 model at `models/best.pt`.  
+   *(See `training/football_training_yolo_v5.ipynb` to train your own, or use
+   a pre-trained checkpoint from [Roboflow Universe](https://universe.roboflow.com/).)*
 
-- `yolo_inference.py`: Perform object detection using YOLOv8.
-- `football_training_yolo_v5.ipynb`: Fine-tune and train a custom YOLO model.
-- `team_assigner.py`: Segment players from the background using KMeans.
-- `camera_movement_estimator.py`: Measure camera movement using optical flow.
-- `view_transformer.py`: Apply perspective transformation to represent scene depth.
-- `speed_and_distance_estimator.py`: Calculate player speed and distance covered.
+2. Place your input video at `input_videos/trimmed_live.mp4`  
+   *(or update the path in `main.py`)*.
 
-You can use these scripts individually or combine them to achieve specific analysis tasks.
+### 4 — Run the pipeline
 
-## Contribution
+```bash
+python main.py
+```
 
-Contributions to this project are welcome! If you have any ideas for improvements or new features, feel free to open an issue or submit a pull request.
+The annotated video will be saved to `output_videos/trimmed_live.mp4`.
+
+---
+
+## Usage Details
+
+### Stub caching
+
+On the first run, tracking and camera-movement results are computed and cached
+as pickle files in `stubs/`.  Subsequent runs load from the cache to save time.
+To force recomputation, delete the `.pkl` files or set `read_from_stub=False`
+in `main.py`.
+
+### Standalone inference
+
+```bash
+python yolo_inference.py
+```
+
+Runs raw YOLOv8 inference on `input_videos/08fd33_4.mp4` and prints detected
+bounding boxes.
+
+### Training a custom model
+
+Open `training/football_training_yolo_v5.ipynb` in Jupyter and follow the
+instructions to fine-tune YOLOv8 on the bundled Roboflow dataset.
+
+---
+
+## Pipeline Overview
+
+```
+Input video
+    │
+    ▼
+Object Detection (YOLOv8)
+    │
+    ▼
+Multi-Object Tracking (ByteTrack)
+    │
+    ├─► Team Assignment (KMeans on shirt colour)
+    │
+    ├─► Ball Possession (nearest-player distance)
+    │
+    ├─► Camera Movement Estimation (Lucas-Kanade optical flow)
+    │       └─► Adjusted positions (camera-compensated)
+    │
+    ├─► Perspective Transformation (homography → metres)
+    │
+    └─► Speed & Distance Estimation
+    │
+    ▼
+Annotated Output Video
+```
+
+---
+
+## Known Limitations
+
+- The perspective transform vertices (`view_transformer.py`) are hard-coded for
+  a specific camera angle and resolution. Adjust `pixel_vertices` for your own
+  footage.
+- Player ID `91` is hard-coded to team 1 in `team_assigner.py` — remove or
+  generalise this if it does not apply to your video.
+- The `draw_team_ball_control` overlay assumes a 1920 × 1080 output resolution.
+
+---
+
+## Contributing
+
+Contributions are welcome! Please open an issue to discuss your idea before
+submitting a pull request.
+
+---
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+This project is licensed under the **MIT License**. See the [LICENSE](LICENSE)
+file for details.
 
-## Acknowledgments
+---
 
-- Ultralytics for providing the YOLOv8 implementation.
-- OpenCV for the powerful computer vision functionalities.
-- Contributors to various libraries and frameworks used in this project.
+## Acknowledgements
+
+- [Ultralytics](https://github.com/ultralytics/ultralytics) for YOLOv8
+- [Roboflow](https://roboflow.com/) for dataset tooling
+- [supervision](https://github.com/roboflow/supervision) for the ByteTrack wrapper
+- [OpenCV](https://opencv.org/) for computer vision primitives
