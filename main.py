@@ -3,7 +3,7 @@ import glob
 import warnings
 
 from utils import read_video, save_video
-from trackers import Tracker
+from trackers import FootballBotSortTracker
 import cv2
 import numpy as np
 from team_assigner import TeamAssigner
@@ -350,7 +350,7 @@ def main():
     print(f"Found {len(video_files)} video(s) to process: {video_files}")
 
     # Initialize tracker once and reuse across videos
-    tracker = Tracker('models/soccer.onnx')
+    tracker = FootballBotSortTracker('models/soccer.onnx', config_path='botsort_football.yaml')
 
     for video_path in video_files:
         process_video(video_path, tracker)
