@@ -39,3 +39,6 @@ gmc_method: sparseOptFlow
 # Enable appearance embeddings for re-identification after occlusion.
 # Requires an Ultralytics-compatible ReID model.
 with_reid: False
+# ReID model name or path; "auto" uses detector features when available.
+# Required by ultralytics >= 8.2 (BoT-SORT build_encoder).
+model: auto
