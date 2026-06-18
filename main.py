@@ -26,12 +26,18 @@ def assign_team_player_ids(tracks):
       - 'team_player_id'     : str 'a1'-'a11' or 'b1'-'b11'
       - 'nearest_teammate_id': str of the spatially closest teammate, or None
 
-    When the team pool is exhausted (more than 11 track IDs detected for a
-    team), the extra player inherits the ID of the geographically nearest
-    same-team player that already holds an ID.  The match is computed from
-    the full position history (last known position) rather than
-    a single snapshot.  Each existing ID may be recycled at most once so that
-    no two extra players receive the same ID (no-duplicate rule).
+    Strict invariants enforced at every stage:
+      - 'a'-prefixed IDs are only ever assigned to team-1 players.
+      - 'b'-prefixed IDs are only ever assigned to team-2 players.
+      - No two tracker IDs receive the same team_player_id unless all 11 IDs
+        of a team have already been claimed (last-resort duplicate allowed only
+        when the pool is fully exhausted).
+
+    When the team pool is not yet exhausted, extra players inherit the ID of
+    the nearest available same-team player (spatial distance from last known
+    position).  When every ID in the pool has been claimed, the extra player
+    is assigned the ID of the spatially+temporally closest same-team player
+    (duplicate allowed as last resort, strictly within the same team).
     """
     TEAM_PREFIX = {1: 'a', 2: 'b'}
 
@@ -109,16 +115,23 @@ def assign_team_player_ids(tracks):
             recycled_ids.add(best_id)
 
     # --- Fallback: players still without ID after recycling ---
-    # Handles: no team, no position, recycled-IDs exhausted, team not in {1,2}.
-    # Scores by combined spatial + temporal proximity from the full history.
-    # Same-team is tried first; cross-team is used when no same-team candidate
-    # exists.  Duplicates are allowed here — this is a last-resort assignment.
-    def _closest_from_history(player_id, restrict_team):
-        """Return the team_player_id of the historically closest mapped player.
+    # Strict invariants:
+    #   1. 'a'-prefixed IDs → team 1 only; 'b'-prefixed IDs → team 2 only.
+    #      Cross-team assignment is never performed.
+    #   2. Duplicates are avoided by tracking which IDs have already been
+    #      claimed in this pass.  When the closest candidate's ID is already
+    #      taken, the next-closest same-team candidate is tried instead.
+    #   3. Only when *all* same-team IDs are exhausted is a duplicate allowed
+    #      (last resort), still strictly within the same team.
+    #   4. Players whose team is unknown are skipped — no ID is assigned.
+
+    def _closest_from_history(player_id, restrict_team, excluded_ids=None):
+        """Return the team_player_id of the historically closest eligible player.
 
         Combines Euclidean spatial distance (pixels) with temporal distance
-        (frame index difference) into a single score.  Returns None when
-        *team_player_id_map* contains no eligible candidate.
+        (frame-index difference) into a single score.  Candidates whose
+        team_player_id is in *excluded_ids* are skipped.  Returns None when no
+        eligible candidate exists in *team_player_id_map*.
         """
         pos = last_pos(player_id)
         frame_idx = first_frame[player_id]
@@ -126,6 +139,8 @@ def assign_team_player_ids(tracks):
         min_score = float('inf')
         for existing_pid, existing_tpid in team_player_id_map.items():
             if restrict_team is not None and player_teams.get(existing_pid) != restrict_team:
+                continue
+            if excluded_ids and existing_tpid in excluded_ids:
                 continue
             existing_pos = last_pos(existing_pid)
             existing_frame = first_frame.get(existing_pid, 0)
@@ -141,23 +156,36 @@ def assign_team_player_ids(tracks):
                 best_id = existing_tpid
         return best_id
 
+    # Track which IDs have already been claimed in the fallback pass (per team).
+    fallback_used_ids: dict[int, set] = {}
+
     for player_id in sorted(first_frame, key=first_frame.__getitem__):
         if player_id in team_player_id_map:
             continue
         team = player_teams.get(player_id)
-        # Prefer same-team match; fall back to any team if nothing found.
-        if team is not None:
-            best_id = _closest_from_history(player_id, restrict_team=team)
-            if best_id is None:
-                best_id = _closest_from_history(player_id, restrict_team=None)
-        else:
-            best_id = _closest_from_history(player_id, restrict_team=None)
+        if team is None:
+            # Unknown team: skip — never assign a cross-team or arbitrary ID.
+            continue
+
+        used = fallback_used_ids.setdefault(team, set())
+
+        # Try to find the closest same-team ID that is not yet claimed.
+        best_id = _closest_from_history(player_id, restrict_team=team,
+                                        excluded_ids=used)
+        if best_id is None:
+            # All same-team IDs are exhausted: allow a duplicate as last resort,
+            # but still strictly within the same team (no cross-team assignment).
+            best_id = _closest_from_history(player_id, restrict_team=team,
+                                            excluded_ids=None)
+
         if best_id is not None:
             team_player_id_map[player_id] = best_id
+            used.add(best_id)
 
     # --- Rigorous invariant check ---
-    # Every tracked player MUST have a team_player_id at this point.
-    missing_ids = [pid for pid in first_frame if pid not in team_player_id_map]
+    # Every tracked player with a known team MUST have a team_player_id.
+    missing_ids = [pid for pid in first_frame
+                   if pid not in team_player_id_map and player_teams.get(pid) is not None]
     if missing_ids:
         warnings.warn(
             f"assign_team_player_ids: {len(missing_ids)} player(s) still without "
