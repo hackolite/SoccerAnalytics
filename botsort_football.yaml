@@ -25,6 +25,9 @@ track_buffer: 120
 # Higher value → more permissive matching; helps in crowded football scenes.
 match_thresh: 0.85
 
+# Whether to fuse detection scores into the association cost matrix.
+fuse_score: False
+
 # IoU-based spatial proximity gate for second-stage matching
 proximity_thresh: 0.5
 # Cosine appearance distance gate; detections with higher distance are rejected
