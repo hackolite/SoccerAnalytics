@@ -50,11 +50,14 @@ def assign_team_player_ids(tracks):
     player_team_votes = {}  # {player_id: {team: frame_count}}
     position_history = {}   # {player_id: [pos, ...]}
     first_frame = {}        # {player_id: frame_index} for first-appearance ordering
+    goalkeeper_ids = set()  # player IDs flagged as goalkeepers
 
     for frame_num, player_track in enumerate(tracks['players']):
         for player_id, player_info in player_track.items():
             if player_id not in first_frame:
                 first_frame[player_id] = frame_num
+            if player_info.get('is_goalkeeper', False):
+                goalkeeper_ids.add(player_id)
             team = player_info.get('team')
             if team is not None:
                 votes = player_team_votes.setdefault(player_id, {})
@@ -78,12 +81,27 @@ def assign_team_player_ids(tracks):
         return (sum(p[0] for p in hist) / len(hist),
                 sum(p[1] for p in hist) / len(hist))
 
-    # --- Assign fresh IDs to the first 10 unique players per team ---
+    # --- Assign goalkeeper IDs first ('0'), one per team ---
+    # Goalkeepers are excluded from the outfield 10-player pool so they
+    # never displace an outfield player ID.  All goalkeepers receive the
+    # special ID '0' regardless of which team they belong to.
     team_player_id_map = {}
+    gk_assigned_teams: set = set()  # tracks which teams already have a GK ID
+
+    for player_id in sorted(goalkeeper_ids, key=lambda p: first_frame.get(p, 0)):
+        team = player_teams.get(player_id)
+        if team is None or team in gk_assigned_teams:
+            continue
+        team_player_id_map[player_id] = '0'
+        gk_assigned_teams.add(team)
+
+    # --- Assign fresh IDs to the first 10 unique outfield players per team ---
     team_counters = {1: 0, 2: 0}
 
     for player_id in sorted(first_frame, key=first_frame.__getitem__):
         if player_id in team_player_id_map:
+            continue
+        if player_id in goalkeeper_ids:
             continue
         team = player_teams.get(player_id)
         if team not in team_counters:
@@ -98,13 +116,16 @@ def assign_team_player_ids(tracks):
         """Return the single letter that all IDs for *team* must start with."""
         return TEAM_PREFIX.get(team, '')
 
-    # --- Recycle IDs for extra players using average position history ---
+    # --- Recycle IDs for extra outfield players using average position history ---
     # Each existing ID may be recycled at most once (no-duplicate rule).
     # Safety: only IDs whose prefix matches the player's team are considered.
+    # Goalkeeper IDs ('ag' / 'bg') are never recycled to outfield players.
     recycled_ids = set()
 
     for player_id in sorted(first_frame, key=first_frame.__getitem__):
         if player_id in team_player_id_map:
+            continue
+        if player_id in goalkeeper_ids:
             continue
         team = player_teams.get(player_id)
         if team is None:
@@ -117,6 +138,9 @@ def assign_team_player_ids(tracks):
         best_id = None
         min_dist = float('inf')
         for existing_pid, existing_tpid in team_player_id_map.items():
+            # Skip goalkeeper IDs ('0') — they must not be recycled to outfield players.
+            if existing_tpid == '0':
+                continue
             # Strict team check — 'a' IDs with team-1 players, 'b' with team-2.
             if player_teams.get(existing_pid) != team:
                 continue
@@ -154,6 +178,7 @@ def assign_team_player_ids(tracks):
         Combines Euclidean spatial distance (pixels, using average position)
         with temporal distance (frame-index difference) into a single score.
         Candidates whose team_player_id is in *excluded_ids* are skipped.
+        Goalkeeper IDs (ending with 'g') are never returned as candidates.
         Prefix is validated so that only IDs matching *restrict_team*'s
         expected letter are considered (no cross-team contamination).
         Returns None when no eligible candidate exists in *team_player_id_map*.
@@ -164,6 +189,9 @@ def assign_team_player_ids(tracks):
         best_id = None
         min_score = float('inf')
         for existing_pid, existing_tpid in team_player_id_map.items():
+            # Never recycle goalkeeper IDs ('0') to outfield players.
+            if existing_tpid == '0':
+                continue
             if restrict_team is not None and player_teams.get(existing_pid) != restrict_team:
                 continue
             # Explicit prefix guard — ensures 'a' IDs stay with team 1 and
@@ -191,6 +219,8 @@ def assign_team_player_ids(tracks):
 
     for player_id in sorted(first_frame, key=first_frame.__getitem__):
         if player_id in team_player_id_map:
+            continue
+        if player_id in goalkeeper_ids:
             continue
         team = player_teams.get(player_id)
         if team is None:
@@ -227,11 +257,13 @@ def assign_team_player_ids(tracks):
         )
 
     # 2. Prefix-team consistency: 'a' IDs must belong to team 1 only,
-    #    'b' IDs must belong to team 2 only.  Any violation is a bug.
+    #    'b' IDs must belong to team 2 only.  Goalkeeper IDs ('0') are
+    #    exempt from the prefix check.  Any other violation is a bug.
     cross_team = [
         (pid, tpid, player_teams.get(pid))
         for pid, tpid in team_player_id_map.items()
         if player_teams.get(pid) is not None
+        and tpid != '0'
         and not tpid.startswith(_expected_prefix(player_teams[pid]))
     ]
     if cross_team:
@@ -336,10 +368,12 @@ def process_video(video_path, tracker):
     team_assigner = TeamAssigner()
 
     # Global KMeans(2) on per-player averaged jersey colors: collect colors
-    # from every 10th frame, average per player, cluster → definitive team map.
-    # This is more robust than per-frame prediction because transient detection
-    # artefacts (occlusions, bad crops) are smoothed out by averaging.
-    team_map = team_assigner.assign_teams_global(video_frames, tracks['players'], sample_every=10)
+    # from 50 evenly-spaced frames, average per player, cluster → definitive
+    # team map.  Goalkeepers are excluded from the KMeans fit and assigned
+    # to a team via spatial proximity.  This is more robust than per-frame
+    # prediction because transient detection artefacts (occlusions, bad crops)
+    # are smoothed out by averaging.
+    team_map = team_assigner.assign_teams_global(video_frames, tracks['players'])
 
     for frame_num, player_track in enumerate(tracks['players']):
         for player_id, track in player_track.items():
