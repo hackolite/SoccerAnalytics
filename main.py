@@ -20,16 +20,16 @@ def assign_team_player_ids(tracks):
     """Assign stable per-team IDs to each player and compute nearest teammate ID.
 
     Each team gets its own ID counter that resets from 1, with a letter prefix:
-    team 1 → 'a1' … 'a11', team 2 → 'b1' … 'b11'.  The mapping is built in
+    team 1 → 'a1' … 'a10', team 2 → 'b1' … 'b10'.  The mapping is built in
     first-appearance order and kept consistent across all frames.  Two new keys
     are added to every player entry:
-      - 'team_player_id'     : str 'a1'-'a11' or 'b1'-'b11'
+      - 'team_player_id'     : str 'a1'-'a10' or 'b1'-'b10'
       - 'nearest_teammate_id': str of the spatially closest teammate, or None
 
     Strict invariants enforced at every stage:
       - 'a'-prefixed IDs are only ever assigned to team-1 players.
       - 'b'-prefixed IDs are only ever assigned to team-2 players.
-      - No two tracker IDs receive the same team_player_id unless all 11 IDs
+      - No two tracker IDs receive the same team_player_id unless all 10 IDs
         of a team have already been claimed (last-resort duplicate allowed only
         when the pool is fully exhausted).
 
@@ -78,7 +78,7 @@ def assign_team_player_ids(tracks):
         return (sum(p[0] for p in hist) / len(hist),
                 sum(p[1] for p in hist) / len(hist))
 
-    # --- Assign fresh IDs to the first 11 unique players per team ---
+    # --- Assign fresh IDs to the first 10 unique players per team ---
     team_player_id_map = {}
     team_counters = {1: 0, 2: 0}
 
@@ -88,7 +88,7 @@ def assign_team_player_ids(tracks):
         team = player_teams.get(player_id)
         if team not in team_counters:
             continue
-        if team_counters[team] >= 11:
+        if team_counters[team] >= 10:
             continue
         team_counters[team] += 1
         prefix = TEAM_PREFIX.get(team, str(team))
@@ -334,7 +334,15 @@ def process_video(video_path, tracker):
     # Assign Player Teams
     print(f"  [7/8] Assigning player teams...")
     team_assigner = TeamAssigner()
-    team_assigner.assign_team_color(video_frames[0], tracks['players'][0])
+
+    # Sample up to 10 evenly-spaced frames so KMeans sees a representative
+    # spread of jersey colours rather than only the first frame.
+    _n_sample = 10
+    _step = max(1, len(video_frames) // _n_sample)
+    _sample_indices = list(range(0, len(video_frames), _step))[:_n_sample]
+    _sample_frames = [video_frames[i] for i in _sample_indices]
+    _sample_tracks = [tracks['players'][i] for i in _sample_indices]
+    team_assigner.assign_team_color(_sample_frames, _sample_tracks)
 
     for frame_num, player_track in enumerate(tracks['players']):
         for player_id, track in player_track.items():
@@ -345,7 +353,7 @@ def process_video(video_path, tracker):
             tracks['players'][frame_num][player_id]['team_color'] = team_assigner.team_colors[team]
     print(f"        -> Teams assigned.")
 
-    # Assign per-team IDs (1-11) and nearest teammate ID
+    # Assign per-team IDs (1-10) and nearest teammate ID
     assign_team_player_ids(tracks)
 
     # Assign Ball Acquisition

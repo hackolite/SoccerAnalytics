@@ -39,15 +39,38 @@ class TeamAssigner:
         return player_color
 
 
-    def assign_team_color(self,frame, player_detections):
-        print(f"    [TeamAssigner] Assigning team colors from {len(player_detections)} player(s) in frame 0...")
+    def assign_team_color(self, frames, player_tracks_list):
+        """Fit KMeans(2) on player jersey colors sampled from one or more frames.
+
+        Accepts either a single frame + player_detections dict (legacy) or a
+        list of frames paired with a list of player-track dicts.  Using multiple
+        frames produces a more robust cluster fit because it samples more
+        outfield-player appearances before the model is frozen.
+        """
+        # Normalise: accept (frame, dict) or ([frame, …], [dict, …])
+        if not isinstance(frames, list):
+            frames = [frames]
+            player_tracks_list = [player_tracks_list]
+
         player_colors = []
-        for _, player_detection in player_detections.items():
-            bbox = player_detection["bbox"]
-            player_color =  self.get_player_color(frame,bbox)
-            player_colors.append(player_color)
-        
-        kmeans = KMeans(n_clusters=2, init="k-means++",n_init=10)
+        for frame, player_detections in zip(frames, player_tracks_list):
+            for _, player_detection in player_detections.items():
+                bbox = player_detection["bbox"]
+                try:
+                    player_color = self.get_player_color(frame, bbox)
+                    player_colors.append(player_color)
+                except Exception:
+                    continue
+
+        total_players = len(player_colors)
+        print(f"    [TeamAssigner] Fitting KMeans on {total_players} player color sample(s) "
+              f"from {len(frames)} frame(s)...")
+
+        if total_players < 2:
+            print("    [TeamAssigner] Not enough samples to fit KMeans — skipping.")
+            return
+
+        kmeans = KMeans(n_clusters=2, init="k-means++", n_init=10)
         kmeans.fit(player_colors)
 
         self.kmeans = kmeans
