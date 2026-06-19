@@ -335,20 +335,20 @@ def process_video(video_path, tracker):
     print(f"  [7/8] Assigning player teams...")
     team_assigner = TeamAssigner()
 
-    # Sample up to 10 evenly-spaced frames so KMeans sees a representative
-    # spread of jersey colours rather than only the first frame.
-    _n_sample = 10
-    _step = max(1, len(video_frames) // _n_sample)
-    _sample_indices = list(range(0, len(video_frames), _step))[:_n_sample]
-    _sample_frames = [video_frames[i] for i in _sample_indices]
-    _sample_tracks = [tracks['players'][i] for i in _sample_indices]
-    team_assigner.assign_team_color(_sample_frames, _sample_tracks)
+    # Global KMeans(2) on per-player averaged jersey colors: collect colors
+    # from every 10th frame, average per player, cluster → definitive team map.
+    # This is more robust than per-frame prediction because transient detection
+    # artefacts (occlusions, bad crops) are smoothed out by averaging.
+    team_map = team_assigner.assign_teams_global(video_frames, tracks['players'], sample_every=10)
 
     for frame_num, player_track in enumerate(tracks['players']):
         for player_id, track in player_track.items():
-            team = team_assigner.get_player_team(video_frames[frame_num],
-                                                 track['bbox'],
-                                                 player_id)
+            # Use global map; fall back to per-frame prediction for players
+            # that were not seen during sampling (rare edge case).
+            team = team_map.get(
+                player_id,
+                team_assigner.get_player_team(video_frames[frame_num], track['bbox'], player_id),
+            )
             tracks['players'][frame_num][player_id]['team'] = team
             tracks['players'][frame_num][player_id]['team_color'] = team_assigner.team_colors[team]
     print(f"        -> Teams assigned.")
