@@ -168,10 +168,10 @@ class FootballBotSortTracker:
     # Minimum composite score to re-identify a lost player instead of creating
     # a new stable ID.  Score formula: 0.6*appearance + 0.3*motion + 0.1*iou.
     REID_MATCH_THRESHOLD: float = 0.35
-    # Hard cap: 10 outfield players × 2 teams (no goalkeepers).  A 21st stable
-    # ID is never minted; detections beyond this limit are force-assigned to
-    # the best history match.
-    MAX_STABLE_IDS: int = 20
+    # Hard cap: 10 outfield players × 2 teams + 2 goalkeepers = 22 total.
+    # A 23rd stable ID is never minted; detections beyond this limit are
+    # force-assigned to the best history match.
+    MAX_STABLE_IDS: int = 22
 
     def __init__(
         self,
@@ -469,14 +469,15 @@ class FootballBotSortTracker:
                 cls_id = int(box.cls[0])
                 cls_name = cls_names.get(cls_id, '')
 
-                # Skip goalkeepers and referees — their jersey colours differ too
-                # much from outfield players and would corrupt team assignment.
-                if cls_name in ('goalkeeper', 'referee'):
+                # Skip referees — their jersey colours are irrelevant for
+                # team assignment.  Goalkeepers are tracked alongside players
+                # and marked with ``is_goalkeeper=True``.
+                if cls_name == 'referee':
                     continue
 
                 raw_id = int(box.id[0]) if box.id is not None else -1
 
-                if cls_name == 'player' and raw_id >= 0:
+                if cls_name in ('player', 'goalkeeper') and raw_id >= 0:
                     if raw_id in self._id_map:
                         stable_id = self._id_map[raw_id]
                         # Guard: if this stable_id was already claimed this frame
@@ -550,7 +551,10 @@ class FootballBotSortTracker:
                         self._id_map[raw_id] = stable_id
 
                     current_stable_ids.add(stable_id)
-                    tracks["players"][frame_num][stable_id] = {"bbox": bbox}
+                    track_entry: dict = {"bbox": bbox}
+                    if cls_name == 'goalkeeper':
+                        track_entry["is_goalkeeper"] = True
+                    tracks["players"][frame_num][stable_id] = track_entry
 
                 elif cls_name == 'ball':
                     tracks["ball"][frame_num][1] = {"bbox": bbox}
