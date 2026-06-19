@@ -233,6 +233,246 @@ Annotated Output Video
 
 ---
 
+## Tracking Strategy — Detailed Documentation
+
+This section explains in depth how the system detects, tracks, and identifies every object (players, referees, ball) from frame to frame.
+
+---
+
+### 1. Object Detection — YOLOv8
+
+The first stage of the pipeline is a **fine-tuned YOLOv8** model (`models/soccer.onnx`) that runs on every frame to produce raw bounding boxes and class labels.
+
+- **Classes detected:** `player`, `goalkeeper`, `referee`, `ball`.
+- **Goalkeepers are remapped to `player`** at detection time so they are tracked exactly like outfield players.
+- **Confidence threshold:** `0.1` (very permissive) to maximise recall; higher-confidence gates are applied downstream by the tracker.
+- Detection runs **frame-by-frame** (batch size 1) via `model.track(…, persist=True)`, which lets Ultralytics keep Kalman-filter state between calls.
+
+---
+
+### 2. Multi-Object Tracking — BoT-SORT
+
+After detection, raw bounding boxes are handed to the **BoT-SORT** tracker (configured in `botsort_football.yaml`).
+
+BoT-SORT performs **two association passes** each frame using the Hungarian algorithm:
+
+| Pass | Candidate pool | Gate |
+|---|---|---|
+| **First (high-conf)** | Detections with score ≥ `track_high_thresh` (0.5) | `match_thresh` 0.85 |
+| **Second (rescue)** | Remaining unmatched detections with score ≥ `track_low_thresh` (0.1) | `proximity_thresh` 0.5 (IoU) |
+
+Key configuration knobs:
+
+| Parameter | Value | Purpose |
+|---|---|---|
+| `track_buffer` | 120 frames (~4 s at 30 fps) | How long a "lost" track is kept alive before being permanently deleted |
+| `new_track_thresh` | 0.6 | Minimum confidence to **create** a brand-new track |
+| `match_thresh` | 0.85 | Maximum Hungarian assignment cost (higher = more permissive) |
+| `appearance_thresh` | 0.25 | Cosine distance gate for appearance embedding matching |
+| `gmc_method` | `sparseOptFlow` | BoT-SORT's internal Global Motion Compensation — aligns predictions to camera movement before association |
+| `with_reid` | `False` | BoT-SORT's built-in ReID is disabled; a custom ReID module is used instead (see §3) |
+
+BoT-SORT outputs a **raw track ID** for each detection. These raw IDs can reset or jump after long occlusions, so the system adds its own stable-ID layer on top (see §4).
+
+---
+
+### 3. Appearance Re-Identification (ReID) — MobileNetV2
+
+To survive long occlusions and camera cuts, the system maintains its own **ReID module** (`trackers/bot_sort_tracker.py : ReIDExtractor`).
+
+**Backbone:** MobileNetV2 (ImageNet pre-trained), classification head removed. Only the convolutional feature extractor is kept.
+
+**Embedding pipeline per detection:**
+1. Crop the player region from the frame using the bounding box.
+2. Resize to **128 × 64 px** (standard ReID input size).
+3. Normalise with ImageNet mean/std.
+4. Forward pass through `backbone.features` → adaptive average pooling → **1280-dimensional vector**.
+5. L2-normalise the vector so cosine similarity equals dot product.
+
+**Gallery:** The last 30 embeddings per track are stored in a rolling deque (`TrackHistory.embeddings`). The mean of the last 10 embeddings is used as the **gallery representative** when matching.
+
+---
+
+### 4. Stable ID Layer — Raw → Stable Mapping
+
+BoT-SORT can reassign raw IDs after occlusions. To prevent this from appearing as a new player entering the scene, a **stable ID map** is maintained:
+
+```
+_id_map: {raw_botsort_id → stable_per_video_id}
+```
+
+When a **new raw ID** appears, the system:
+
+1. Gathers all currently active `TrackHistory` entries as "lost" candidates.
+2. Extracts a ReID embedding for the new detection.
+3. Calls `match_player()` to compute a **composite score** against every candidate:
+
+```
+score = 0.6 × appearance_similarity   (cosine similarity in embedding space)
+      + 0.3 × motion_similarity        (1 – normalised spatial distance)
+      + 0.1 × bbox_similarity          (IoU of bounding boxes)
+```
+
+4. If the best score ≥ `REID_MATCH_THRESHOLD` (0.35), the new raw ID is mapped to the **existing stable ID** (re-identification).
+5. Otherwise a fresh stable ID is minted (`_next_stable_id`).
+
+**Hard cap:** The system never mints more than **22 stable IDs** (`MAX_STABLE_IDS = 22`, i.e. 11 players × 2 teams). When the cap is reached any new raw ID is force-assigned to the best available history match, and a warning is logged.
+
+---
+
+### 5. Velocity Filter and ID-Switch Detection
+
+Every frame, for each active track, the system checks whether the new foot-position represents a **physically realistic displacement**:
+
+```
+max_allowed = max(ABS_MAX_SPEED, avg_speed × MAX_SPEED_FACTOR)
+            = max(80 px/frame,   rolling_avg × 3.0)
+```
+
+If the displacement exceeds `max_allowed`, an **ID-switch suspect** entry is logged with:
+- Frame index
+- Track ID
+- Gap since last observation (frames)
+- Euclidean pixel distance of the jump
+- Cosine appearance similarity between current and stored embeddings
+
+This log is printed as warnings at runtime and allows post-hoc diagnosis of tracking quality.
+
+---
+
+### 6. Per-Team Stable IDs — `assign_team_player_ids()`
+
+Once tracking is complete, a second ID assignment pass (`main.py : assign_team_player_ids`) maps the 22 stable IDs to **human-readable jersey-like IDs**:
+
+- Team 1 players: `a1` … `a11`
+- Team 2 players: `b1` … `b11`
+
+**Three-pass algorithm:**
+
+| Pass | Description |
+|---|---|
+| **Team vote** | For every player × every frame, count how many frames they were classified as team 1 vs team 2. The majority team wins (robust to per-frame colour-clustering noise). |
+| **Primary assignment** | The first 11 unique players per team, ordered by their first appearance frame, receive IDs `a1`–`a11` or `b1`–`b11` in order. |
+| **Recycling** | Extra players (beyond 11) inherit the ID of the spatially nearest same-team player whose ID has not yet been recycled. This handles brief ghost detections or tracking splits. |
+| **Fallback** | Any player still without an ID is assigned the historically closest same-team ID using a **combined spatial + temporal score**: `score = euclidean_distance + frame_index_difference`. Prefix invariant is enforced: `a`-prefixed IDs are assigned only to team-1 players and `b`-prefixed IDs only to team-2 players. |
+
+Strict invariants are checked after assignment:
+- Every player with a known team must have a `team_player_id`.
+- No `a`-prefixed ID may appear on a team-2 player (and vice versa). Violations trigger a `RuntimeWarning`.
+
+The nearest-teammate ID (`nearest_teammate_id`) is also computed per frame as the Euclidean closest same-team player, used to draw the **interaction graph** overlay.
+
+---
+
+### 7. Camera Movement Compensation — Lucas-Kanade Optical Flow
+
+The camera pans and tilts to follow the ball, so raw pixel positions are not comparable across frames. The `CameraMovementEstimator` removes this bias.
+
+**Method:** Sparse Lucas-Kanade optical flow (`cv2.calcOpticalFlowPyrLK`).
+
+1. On the **first frame**, good features to track are detected (`cv2.goodFeaturesToTrack`) in two fixed **border strips** (columns 0–20 and 900–1050). These regions correspond to the pitch sidelines and advertising hoardings — areas that move only when the camera moves, not when players run.
+2. Each frame, the optical-flow displacement of those features is computed.
+3. The **largest single-feature displacement** (dx, dy) is taken as the camera movement for that frame. Using the maximum rather than the mean makes the estimate robust to features that drift due to player shadows.
+4. A minimum displacement threshold of **5 px** filters out sensor noise.
+5. All player and ball foot positions are then corrected:
+
+```
+position_adjusted = (position_x − camera_dx, position_y − camera_dy)
+```
+
+The corrected positions are stored as `position_adjusted` in the tracks dictionary.
+
+---
+
+### 8. Perspective Transformation — Pixel → Real-World Metres
+
+With camera-corrected pixel positions available, a **homography** maps 2-D image coordinates to top-down real-world metres (`view_transformer/view_transformer.py`).
+
+**Four calibration points** (manually picked from the footage):
+
+| Image pixel (x, y) | Real-world (m) |
+|---|---|
+| (110, 1035) | (0, 68) — bottom-left corner |
+| (265, 275) | (0, 0) — top-left corner |
+| (910, 260) | (23.32, 0) — top-right corner |
+| (1640, 915) | (23.32, 68) — bottom-right corner |
+
+`cv2.getPerspectiveTransform` computes the 3×3 homography matrix from these four correspondences. The transform covers a **23.32 m × 68 m** zone of the pitch (one side of the field).
+
+Only positions **inside the calibration quadrilateral** (`cv2.pointPolygonTest ≥ 0`) are transformed. Points outside this region receive `position_transformed = None` and are excluded from speed/distance computations.
+
+---
+
+### 9. Speed and Distance Estimation
+
+With real-world coordinates available, speed and distance are computed per player over a **sliding window**:
+
+```
+frame_window = 5 frames
+frame_rate   = 24 fps  →  time_elapsed = 5 / 24 ≈ 0.208 s
+
+distance_covered    = Euclidean(position_transformed[frame],
+                                position_transformed[frame + 5])   [metres]
+speed_m_s           = distance_covered / time_elapsed
+speed_km_h          = speed_m_s × 3.6
+cumulative_distance += distance_covered   (accumulated over the full video)
+```
+
+The same window-based method is applied to the **ball** to estimate ball speed and total ball distance. Speed and cumulative distance for each player are stored back in the tracks dictionary and displayed as an overlay on the output video.
+
+---
+
+### 10. Ball Interpolation
+
+YOLO occasionally misses the ball for a few frames (motion blur, partial occlusion). Missing frames are filled by **linear interpolation** (`interpolate_ball_positions`):
+
+1. Extract the bounding-box coordinates for all frames into a Pandas DataFrame.
+2. Call `DataFrame.interpolate()` (linear by default).
+3. Back-fill any leading `NaN` values with `bfill()`.
+
+This produces a continuous ball trajectory with no missing frames.
+
+---
+
+### Tracking Data Flow Summary
+
+```
+Raw video frame
+    │
+    ▼ YOLOv8 (soccer.onnx, conf=0.1)
+Raw bounding boxes + class labels
+    │
+    ▼ BoT-SORT (botsort_football.yaml)
+Raw track IDs + bboxes  ←── Kalman filter prediction
+    │
+    ▼ Stable ID mapping (ReID gallery + composite score)
+Stable player IDs 1–22
+    │
+    ▼ Velocity filter + ID-switch logging
+Validated positions per stable ID
+    │
+    ▼ Team assignment (KMeans) + majority vote
+team=1 or team=2 per player
+    │
+    ▼ assign_team_player_ids()  (3-pass algorithm)
+team_player_id: a1–a11 / b1–b11
+nearest_teammate_id per frame
+    │
+    ▼ Camera movement compensation (Lucas-Kanade)
+position_adjusted (camera-corrected pixels)
+    │
+    ▼ Perspective transform (homography)
+position_transformed (real-world metres)
+    │
+    ▼ Speed & distance estimation (5-frame window)
+speed (km/h), cumulative_distance (m)
+    │
+    ▼ Annotation + minimap
+Fully annotated output video
+```
+
+---
+
 ## Known Limitations
 
 - The perspective transform vertices (`view_transformer.py`) are hard-coded for
