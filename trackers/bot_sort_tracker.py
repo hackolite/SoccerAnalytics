@@ -468,10 +468,10 @@ class FootballBotSortTracker:
                 cls_id = int(box.cls[0])
                 cls_name = cls_names.get(cls_id, '')
 
-                # Remap goalkeeper → player so goalkeepers are tracked uniformly
-                if cls_name == 'goalkeeper':
-                    cls_id = cls_names_inv.get('player', cls_id)
-                    cls_name = 'player'
+                # Skip goalkeepers and referees — their jersey colours differ too
+                # much from outfield players and would corrupt team assignment.
+                if cls_name in ('goalkeeper', 'referee'):
+                    continue
 
                 raw_id = int(box.id[0]) if box.id is not None else -1
 
@@ -551,8 +551,6 @@ class FootballBotSortTracker:
                     current_stable_ids.add(stable_id)
                     tracks["players"][frame_num][stable_id] = {"bbox": bbox}
 
-                elif cls_name == 'referee' and raw_id >= 0:
-                    tracks["referees"][frame_num][raw_id] = {"bbox": bbox}
                 elif cls_name == 'ball':
                     tracks["ball"][frame_num][1] = {"bbox": bbox}
 
@@ -763,10 +761,6 @@ class FootballBotSortTracker:
 
             player_dict = tracks["players"][frame_num]
             ball_dict = tracks["ball"][frame_num]
-            referee_dict = tracks["referees"][frame_num]
-
-            # Interaction graph drawn first so ellipses sit on top
-            frame = self.draw_player_interaction_graph(frame, player_dict)
 
             for track_id, player in player_dict.items():
                 color = player.get("team_color", (0, 0, 255))
@@ -774,9 +768,6 @@ class FootballBotSortTracker:
                 frame = self.draw_ellipse(frame, player["bbox"], color, display_id)
                 if player.get('has_ball', False):
                     frame = self.draw_traingle(frame, player["bbox"], (0, 0, 255))
-
-            for _, referee in referee_dict.items():
-                frame = self.draw_ellipse(frame, referee["bbox"], (0, 255, 255))
 
             for _, ball in ball_dict.items():
                 frame = self.draw_traingle(frame, ball["bbox"], (0, 255, 0))

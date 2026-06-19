@@ -73,10 +73,14 @@ class Tracker:
             # Covert to supervision Detection format
             detection_supervision = sv.Detections.from_ultralytics(detection)
 
-            # Convert GoalKeeper to player object
-            for object_ind , class_id in enumerate(detection_supervision.class_id):
-                if cls_names[class_id] == "goalkeeper":
-                    detection_supervision.class_id[object_ind] = cls_names_inv["player"]
+            # Keep only players and the ball — skip goalkeepers and referees
+            # as their jersey colours differ too much from outfield players
+            # and would corrupt team assignment.
+            keep_classes = {cls_names_inv.get(c) for c in ('player', 'ball')
+                            if c in cls_names_inv}
+            import numpy as _np
+            mask = _np.isin(detection_supervision.class_id, list(keep_classes))
+            detection_supervision = detection_supervision[mask]
 
             # Track Objects
             detection_with_tracks = self.tracker.update_with_detections(detection_supervision)
@@ -92,9 +96,6 @@ class Tracker:
 
                 if cls_id == cls_names_inv['player']:
                     tracks["players"][frame_num][track_id] = {"bbox":bbox}
-                
-                if cls_id == cls_names_inv['referee']:
-                    tracks["referees"][frame_num][track_id] = {"bbox":bbox}
             
             for frame_detection in detection_supervision:
                 bbox = frame_detection[0].tolist()
@@ -260,10 +261,6 @@ class Tracker:
 
             player_dict = tracks["players"][frame_num]
             ball_dict = tracks["ball"][frame_num]
-            referee_dict = tracks["referees"][frame_num]
-
-            # Draw player interaction graph (before ellipses so lines sit behind)
-            frame = self.draw_player_interaction_graph(frame, player_dict)
 
             # Draw Players
             for track_id, player in player_dict.items():
@@ -278,10 +275,6 @@ class Tracker:
                 if player.get('has_ball',False):
                     frame = self.draw_traingle(frame, player["bbox"],(0,0,255))
 
-            # Draw Referee
-            for _, referee in referee_dict.items():
-                frame = self.draw_ellipse(frame, referee["bbox"],(0,255,255))
-            
             # Draw ball 
             for track_id, ball in ball_dict.items():
                 frame = self.draw_traingle(frame, ball["bbox"],(0,255,0))
