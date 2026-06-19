@@ -1,4 +1,5 @@
 from sklearn.cluster import KMeans
+import numpy as np
 
 class TeamAssigner:
     def __init__(self):
@@ -38,24 +39,72 @@ class TeamAssigner:
 
         return player_color
 
+    def assign_teams_global(self, frames, tracks_players, sample_every=10):
+        """Assign teams to all players with a single global KMeans(2) fit.
 
-    def assign_team_color(self,frame, player_detections):
-        print(f"    [TeamAssigner] Assigning team colors from {len(player_detections)} player(s) in frame 0...")
-        player_colors = []
-        for _, player_detection in player_detections.items():
-            bbox = player_detection["bbox"]
-            player_color =  self.get_player_color(frame,bbox)
-            player_colors.append(player_color)
-        
-        kmeans = KMeans(n_clusters=2, init="k-means++",n_init=10)
-        kmeans.fit(player_colors)
+        For each stable player ID, jersey colors are collected from every
+        ``sample_every``-th frame.  The colors are averaged per player to
+        produce one representative RGB vector that is robust to partial
+        occlusions and detection noise.  A single KMeans(n_clusters=2) model
+        is then fitted on those averaged vectors so every player is assigned
+        to the cluster (team) that best matches their typical jersey color.
+
+        This is more reliable than per-frame prediction with caching because:
+          - Averaging suppresses noisy single-frame crops.
+          - All players are clustered together, so the two centroids always
+            correspond to the two teams rather than background colors.
+
+        Returns
+        -------
+        dict
+            ``{player_id: team}`` where team is 1 or 2.  Also updates
+            ``self.team_colors``, ``self.kmeans``, and
+            ``self.player_team_dict`` so that ``get_player_team`` falls back
+            correctly for any player not seen during sampling.
+        """
+        # Collect per-player color samples from evenly-spaced frames.
+        color_samples: dict[int, list] = {}
+        sampled_indices = range(0, len(frames), max(1, sample_every))
+        for frame_idx in sampled_indices:
+            frame = frames[frame_idx]
+            for player_id, player_info in tracks_players[frame_idx].items():
+                bbox = player_info['bbox']
+                try:
+                    color = self.get_player_color(frame, bbox)
+                    color_samples.setdefault(player_id, []).append(color)
+                except Exception:
+                    continue
+
+        if len(color_samples) < 2:
+            print("    [TeamAssigner] Not enough players sampled for global KMeans — skipping.")
+            return {}
+
+        # Average colors per player → one representative vector each.
+        player_ids = sorted(color_samples.keys())
+        avg_colors = np.array([np.mean(color_samples[pid], axis=0) for pid in player_ids])
+
+        print(f"    [TeamAssigner] Global KMeans(2) on {len(player_ids)} players "
+              f"(sampled from {len(list(sampled_indices))} frames)...")
+
+        kmeans = KMeans(n_clusters=2, init='k-means++', n_init=10, random_state=0)
+        labels = kmeans.fit_predict(avg_colors)
 
         self.kmeans = kmeans
-
         self.team_colors[1] = kmeans.cluster_centers_[0]
         self.team_colors[2] = kmeans.cluster_centers_[1]
-        print(f"    [TeamAssigner] Team colors set: team1={self.team_colors[1]}, team2={self.team_colors[2]}")
 
+        # Build and cache the global player → team map (label 0 → team 1, etc.).
+        team_map = {pid: int(label) + 1 for pid, label in zip(player_ids, labels)}
+        self.player_team_dict.update(team_map)
+
+        n1 = sum(1 for t in team_map.values() if t == 1)
+        n2 = sum(1 for t in team_map.values() if t == 2)
+        print(f"    [TeamAssigner] Assignment complete: team 1 → {n1} players, "
+              f"team 2 → {n2} players.")
+        print(f"    [TeamAssigner] Team colors: team1={self.team_colors[1]}, "
+              f"team2={self.team_colors[2]}")
+
+        return team_map
 
     def get_player_team(self,frame,player_bbox,player_id):
         if player_id in self.player_team_dict:

@@ -168,9 +168,10 @@ class FootballBotSortTracker:
     # Minimum composite score to re-identify a lost player instead of creating
     # a new stable ID.  Score formula: 0.6*appearance + 0.3*motion + 0.1*iou.
     REID_MATCH_THRESHOLD: float = 0.35
-    # Hard cap: 11 players × 2 teams.  A 23rd stable ID is never minted;
-    # detections beyond this limit are force-assigned to the best history match.
-    MAX_STABLE_IDS: int = 22
+    # Hard cap: 10 outfield players × 2 teams (no goalkeepers).  A 21st stable
+    # ID is never minted; detections beyond this limit are force-assigned to
+    # the best history match.
+    MAX_STABLE_IDS: int = 20
 
     def __init__(
         self,
