@@ -40,20 +40,19 @@ class TeamAssigner:
 
         return player_color
 
-    def assign_teams_global(self, frames, tracks_players, sample_every=10):
+    def assign_teams_global(self, frames, tracks_players):
         """Assign teams to all players with a single global KMeans(2) fit.
 
-        For each stable outfield player ID, jersey colors are collected from
-        evenly-spaced frames (at least 50 frames are always sampled to ensure a
-        robust fit).  The colors are averaged per player to produce one
+        Exactly 50 evenly-spaced frames are sampled from the video to collect
+        jersey colors.  Colors are averaged per player to produce one
         representative RGB vector.  A single KMeans(n_clusters=2) model is then
         fitted on those averaged vectors so every outfield player is assigned to
         the cluster (team) that best matches their typical jersey color.
 
-        Goalkeepers (``is_goalkeeper=True``) are excluded from the KMeans fit
-        because their jersey colors differ from outfield players.  After the
-        outfield assignment they are assigned to whichever team's spatial
-        centroid is closest to their average on-field position.
+        Goalkeepers (``is_goalkeeper=True``) are **never** included in the
+        KMeans fit because their jersey colors differ from outfield players.
+        After the outfield assignment they are assigned to whichever team's
+        spatial centroid is closest to their average on-field position.
 
         Returns
         -------
@@ -63,10 +62,12 @@ class TeamAssigner:
             ``self.player_team_dict`` so that ``get_player_team`` falls back
             correctly for any player not seen during sampling.
         """
-        # Enforce a minimum of 50 sampled frames for a robust KMeans fit.
-        min_sample_frames = 50
-        effective_every = min(sample_every, max(1, len(frames) // min_sample_frames))
-        sampled_indices = list(range(0, len(frames), max(1, effective_every)))
+        # Sample exactly 50 evenly-spaced frames for a robust KMeans fit.
+        n_sample_frames = 50
+        sampled_indices = [
+            int(i)
+            for i in np.linspace(0, len(frames) - 1, min(n_sample_frames, len(frames)))
+        ]
 
         # Collect per-player color samples (outfield only) and goalkeeper
         # positions separately.
