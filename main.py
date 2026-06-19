@@ -33,37 +33,50 @@ def assign_team_player_ids(tracks):
         of a team have already been claimed (last-resort duplicate allowed only
         when the pool is fully exhausted).
 
+    Team membership is determined by majority vote across all frames in which
+    a player appears, making the assignment robust to per-frame noise from the
+    colour-clustering team assigner.
+
     When the team pool is not yet exhausted, extra players inherit the ID of
-    the nearest available same-team player (spatial distance from last known
-    position).  When every ID in the pool has been claimed, the extra player
-    is assigned the ID of the spatially+temporally closest same-team player
-    (duplicate allowed as last resort, strictly within the same team).
+    the nearest available same-team player (spatial distance from average
+    position across all frames).  When every ID in the pool has been claimed,
+    the extra player is assigned the ID of the spatially+temporally closest
+    same-team player (duplicate allowed as last resort, strictly within the
+    same team).
     """
     TEAM_PREFIX = {1: 'a', 2: 'b'}
 
-    # --- Preliminary pass: collect team and full position history per player ---
-    player_teams = {}       # {player_id: team}
+    # --- Preliminary pass: collect team votes and full position history ---
+    player_team_votes = {}  # {player_id: {team: frame_count}}
     position_history = {}   # {player_id: [pos, ...]}
     first_frame = {}        # {player_id: frame_index} for first-appearance ordering
 
     for frame_num, player_track in enumerate(tracks['players']):
         for player_id, player_info in player_track.items():
-            if player_id not in player_teams:
-                team = player_info.get('team')
-                if team is not None:
-                    player_teams[player_id] = team
             if player_id not in first_frame:
                 first_frame[player_id] = frame_num
+            team = player_info.get('team')
+            if team is not None:
+                votes = player_team_votes.setdefault(player_id, {})
+                votes[team] = votes.get(team, 0) + 1
             pos = player_info.get('position_adjusted') or player_info.get('position')
             if pos is not None:
                 position_history.setdefault(player_id, []).append(pos)
 
-    def last_pos(player_id):
-        """Return the last recorded (x, y) position."""
+    # Derive stable team from majority vote across all frames.
+    # Using all frames (not just the first) makes the mapping robust to
+    # per-frame mis-classifications by the colour-clustering team assigner.
+    player_teams = {}
+    for player_id, votes in player_team_votes.items():
+        player_teams[player_id] = max(votes, key=votes.get)
+
+    def avg_pos(player_id):
+        """Return the average (x, y) position across all recorded frames."""
         hist = position_history.get(player_id)
         if not hist:
             return None
-        return hist[-1]
+        return (sum(p[0] for p in hist) / len(hist),
+                sum(p[1] for p in hist) / len(hist))
 
     # --- Assign fresh IDs to the first 11 unique players per team ---
     team_player_id_map = {}
@@ -81,8 +94,13 @@ def assign_team_player_ids(tracks):
         prefix = TEAM_PREFIX.get(team, str(team))
         team_player_id_map[player_id] = f"{prefix}{team_counters[team]}"
 
-    # --- Recycle IDs for extra players using full position history ---
+    def _expected_prefix(team):
+        """Return the single letter that all IDs for *team* must start with."""
+        return TEAM_PREFIX.get(team, '')
+
+    # --- Recycle IDs for extra players using average position history ---
     # Each existing ID may be recycled at most once (no-duplicate rule).
+    # Safety: only IDs whose prefix matches the player's team are considered.
     recycled_ids = set()
 
     for player_id in sorted(first_frame, key=first_frame.__getitem__):
@@ -91,18 +109,22 @@ def assign_team_player_ids(tracks):
         team = player_teams.get(player_id)
         if team is None:
             continue
-        pos = last_pos(player_id)
+        pos = avg_pos(player_id)
         if pos is None:
             continue
 
+        expected_prefix = _expected_prefix(team)
         best_id = None
         min_dist = float('inf')
         for existing_pid, existing_tpid in team_player_id_map.items():
+            # Strict team check — 'a' IDs with team-1 players, 'b' with team-2.
             if player_teams.get(existing_pid) != team:
+                continue
+            if not existing_tpid.startswith(expected_prefix):
                 continue
             if existing_tpid in recycled_ids:
                 continue
-            existing_pos = last_pos(existing_pid)
+            existing_pos = avg_pos(existing_pid)
             if existing_pos is None:
                 continue
             dist = ((pos[0] - existing_pos[0]) ** 2 + (pos[1] - existing_pos[1]) ** 2) ** 0.5
@@ -117,7 +139,8 @@ def assign_team_player_ids(tracks):
     # --- Fallback: players still without ID after recycling ---
     # Strict invariants:
     #   1. 'a'-prefixed IDs → team 1 only; 'b'-prefixed IDs → team 2 only.
-    #      Cross-team assignment is never performed.
+    #      Cross-team assignment is never performed; prefix is validated
+    #      explicitly on every candidate before selection.
     #   2. Duplicates are avoided by tracking which IDs have already been
     #      claimed in this pass.  When the closest candidate's ID is already
     #      taken, the next-closest same-team candidate is tried instead.
@@ -128,21 +151,28 @@ def assign_team_player_ids(tracks):
     def _closest_from_history(player_id, restrict_team, excluded_ids=None):
         """Return the team_player_id of the historically closest eligible player.
 
-        Combines Euclidean spatial distance (pixels) with temporal distance
-        (frame-index difference) into a single score.  Candidates whose
-        team_player_id is in *excluded_ids* are skipped.  Returns None when no
-        eligible candidate exists in *team_player_id_map*.
+        Combines Euclidean spatial distance (pixels, using average position)
+        with temporal distance (frame-index difference) into a single score.
+        Candidates whose team_player_id is in *excluded_ids* are skipped.
+        Prefix is validated so that only IDs matching *restrict_team*'s
+        expected letter are considered (no cross-team contamination).
+        Returns None when no eligible candidate exists in *team_player_id_map*.
         """
-        pos = last_pos(player_id)
+        pos = avg_pos(player_id)
         frame_idx = first_frame[player_id]
+        expected_prefix = _expected_prefix(restrict_team) if restrict_team is not None else None
         best_id = None
         min_score = float('inf')
         for existing_pid, existing_tpid in team_player_id_map.items():
             if restrict_team is not None and player_teams.get(existing_pid) != restrict_team:
                 continue
+            # Explicit prefix guard — ensures 'a' IDs stay with team 1 and
+            # 'b' IDs stay with team 2, even in the fallback pass.
+            if expected_prefix and not existing_tpid.startswith(expected_prefix):
+                continue
             if excluded_ids and existing_tpid in excluded_ids:
                 continue
-            existing_pos = last_pos(existing_pid)
+            existing_pos = avg_pos(existing_pid)
             existing_frame = first_frame.get(existing_pid, 0)
             if pos is not None and existing_pos is not None:
                 spatial = ((pos[0] - existing_pos[0]) ** 2 +
@@ -182,8 +212,8 @@ def assign_team_player_ids(tracks):
             team_player_id_map[player_id] = best_id
             used.add(best_id)
 
-    # --- Rigorous invariant check ---
-    # Every tracked player with a known team MUST have a team_player_id.
+    # --- Rigorous invariant checks ---
+    # 1. Every tracked player with a known team MUST have a team_player_id.
     missing_ids = [pid for pid in first_frame
                    if pid not in team_player_id_map and player_teams.get(pid) is not None]
     if missing_ids:
@@ -192,6 +222,24 @@ def assign_team_player_ids(tracks):
             f"a team_player_id after all assignment passes "
             f"(first 10: {missing_ids[:10]}{'...' if len(missing_ids) > 10 else ''}). "
             "This should not happen — check team assignment and tracking data.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    # 2. Prefix-team consistency: 'a' IDs must belong to team 1 only,
+    #    'b' IDs must belong to team 2 only.  Any violation is a bug.
+    cross_team = [
+        (pid, tpid, player_teams.get(pid))
+        for pid, tpid in team_player_id_map.items()
+        if player_teams.get(pid) is not None
+        and not tpid.startswith(_expected_prefix(player_teams[pid]))
+    ]
+    if cross_team:
+        warnings.warn(
+            f"assign_team_player_ids: {len(cross_team)} cross-team ID assignment(s) "
+            f"detected (first 5: {cross_team[:5]}). "
+            "'a'-prefixed IDs should only appear for team-1 players and "
+            "'b'-prefixed IDs for team-2 players.",
             RuntimeWarning,
             stacklevel=2,
         )
