@@ -42,21 +42,35 @@ class CameraMovementEstimator():
 
 
     def get_camera_movement(self,frames,read_from_stub=False, stub_path=None):
-        # Read the stub 
+        # Read the stub, but only reuse it when the frame count matches.
         if read_from_stub and stub_path is not None and os.path.exists(stub_path):
             print(f"    [CameraMovementEstimator] Loading camera movement from stub: '{stub_path}'")
             with open(stub_path,'rb') as f:
-                return pickle.load(f)
+                cached = pickle.load(f)
+            if len(cached) == len(frames):
+                return cached
+            print(f"    [CameraMovementEstimator] Stub frame count ({len(cached)}) != video frame count ({len(frames)}); recomputing.")
 
         print(f"    [CameraMovementEstimator] Computing camera movement for {len(frames)} frames...")
-        camera_movement = [[0,0]]*len(frames)
+        camera_movement = [[0,0] for _ in range(len(frames))]
 
         old_gray = cv2.cvtColor(frames[0],cv2.COLOR_BGR2GRAY)
         old_features = cv2.goodFeaturesToTrack(old_gray,**self.features)
 
         for frame_num in range(1,len(frames)):
             frame_gray = cv2.cvtColor(frames[frame_num],cv2.COLOR_BGR2GRAY)
+
+            if old_features is None:
+                old_gray = frame_gray.copy()
+                old_features = cv2.goodFeaturesToTrack(frame_gray,**self.features)
+                continue
+
             new_features, _,_ = cv2.calcOpticalFlowPyrLK(old_gray,frame_gray,old_features,None,**self.lk_params)
+
+            if new_features is None:
+                old_gray = frame_gray.copy()
+                old_features = cv2.goodFeaturesToTrack(frame_gray,**self.features)
+                continue
 
             max_distance = 0
             camera_movement_x, camera_movement_y = 0,0
@@ -95,7 +109,10 @@ class CameraMovementEstimator():
             alpha =0.6
             cv2.addWeighted(overlay,alpha,frame,1-alpha,0,frame)
 
-            x_movement, y_movement = camera_movement_per_frame[frame_num]
+            if frame_num < len(camera_movement_per_frame):
+                x_movement, y_movement = camera_movement_per_frame[frame_num]
+            else:
+                x_movement, y_movement = 0, 0
             frame = cv2.putText(frame,f"Camera Movement X: {x_movement:.2f}",(10,30), cv2.FONT_HERSHEY_SIMPLEX,1,(0,0,0),3)
             frame = cv2.putText(frame,f"Camera Movement Y: {y_movement:.2f}",(10,60), cv2.FONT_HERSHEY_SIMPLEX,1,(0,0,0),3)
 
