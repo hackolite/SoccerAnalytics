@@ -181,9 +181,10 @@ def _draw_triangle(frame, bbox, color):
 
 def _draw_team_ball_control(frame, frame_num, team_ball_control):
     import cv2
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (1350, 850), (1900, 970), (255, 255, 255), -1)
-    cv2.addWeighted(overlay, 0.4, frame, 0.6, 0, frame)
+    roi = frame[850:970, 1350:1900]
+    overlay = roi.copy()
+    cv2.rectangle(overlay, (0, 0), (550, 120), (255, 255, 255), -1)
+    cv2.addWeighted(overlay, 0.4, roi, 0.6, 0, roi)
 
     ctrl = team_ball_control[:frame_num + 1]
     t1 = np.sum(ctrl == 1)
@@ -216,7 +217,8 @@ def _draw_player_interaction_graph(frame, player_dict: dict):
             'pos': (x_center, int(y2)), 'color': color, 'nearest': nearest,
         })
 
-    overlay = frame.copy()
+    # Collect all line segments first, then draw with a single full-frame overlay
+    lines = []
     for players in team_players.values():
         if len(players) < 2:
             continue
@@ -228,14 +230,22 @@ def _draw_player_interaction_graph(frame, player_dict: dict):
             if nearest is None or nearest not in tpid_to_pos:
                 continue
             pair = tuple(sorted((p['tpid'], nearest)))
+            if pair in drawn:
+                continue
             pt1 = tuple(map(int, p['pos']))
             pt2 = tuple(map(int, tpid_to_pos[nearest]))
-            cv2.line(overlay, pt1, pt2, color, 2, lineType=cv2.LINE_AA)
-            if pair not in drawn:
-                mid = ((pt1[0] + pt2[0]) // 2, (pt1[1] + pt2[1]) // 2)
-                cv2.putText(overlay, str(nearest), mid,
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-                cv2.putText(overlay, str(nearest), mid,
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-                drawn.add(pair)
+            lines.append((pt1, pt2, color, nearest))
+            drawn.add(pair)
+
+    if not lines:
+        return
+
+    overlay = frame.copy()
+    for pt1, pt2, color, nearest in lines:
+        cv2.line(overlay, pt1, pt2, color, 2, lineType=cv2.LINE_AA)
+        mid = ((pt1[0] + pt2[0]) // 2, (pt1[1] + pt2[1]) // 2)
+        cv2.putText(overlay, str(nearest), mid,
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+        cv2.putText(overlay, str(nearest), mid,
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
     cv2.addWeighted(overlay, 0.4, frame, 0.6, 0, frame)

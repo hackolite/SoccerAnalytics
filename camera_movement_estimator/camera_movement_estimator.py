@@ -104,10 +104,11 @@ class CameraMovementEstimator():
         for frame_num, frame in enumerate(frames):
             frame= frame.copy()
 
-            overlay = frame.copy()
+            roi = frame[0:100, 0:500]
+            overlay = roi.copy()
             cv2.rectangle(overlay,(0,0),(500,100),(255,255,255),-1)
             alpha =0.6
-            cv2.addWeighted(overlay,alpha,frame,1-alpha,0,frame)
+            cv2.addWeighted(overlay,alpha,roi,1-alpha,0,roi)
 
             if frame_num < len(camera_movement_per_frame):
                 x_movement, y_movement = camera_movement_per_frame[frame_num]
