@@ -658,19 +658,34 @@ def main():
     config file is present, otherwise falls back to the legacy per-function
     flow so existing stubs and behaviour are preserved.
 
-    Set the ``CHUNK_SIZE`` environment variable to a positive integer to enable
-    chunked processing in the legacy path.  Videos whose frame count exceeds
-    that value will be split into chunks of that many frames, processed
+    Pass ``CHUNK_SIZE=<n>`` as a command-line argument (or set it as an
+    environment variable) to enable chunked processing.  Videos whose frame
+    count exceeds *n* will be split into chunks of that many frames, processed
     independently, and their outputs concatenated into the final video.
-    Example::
 
-        CHUNK_SIZE=500 python main.py
+    Examples::
+
+        python main.py CHUNK_SIZE=500
+        python main.py                   # no chunking (default)
     """
+    import sys
+
     os.makedirs('stubs', exist_ok=True)
 
-    # Read optional chunk size from environment.
-    _env_chunk = os.environ.get('CHUNK_SIZE', '').strip()
-    chunk_size = int(_env_chunk) if _env_chunk.isdigit() and int(_env_chunk) > 0 else None
+    # Accept CHUNK_SIZE=<n> either as a CLI argument or an environment variable.
+    # CLI argument takes precedence.
+    chunk_size = None
+    for arg in sys.argv[1:]:
+        if arg.upper().startswith('CHUNK_SIZE='):
+            val = arg.split('=', 1)[1].strip()
+            if val.isdigit() and int(val) > 0:
+                chunk_size = int(val)
+            break
+
+    if chunk_size is None:
+        _env_chunk = os.environ.get('CHUNK_SIZE', '').strip()
+        if _env_chunk.isdigit() and int(_env_chunk) > 0:
+            chunk_size = int(_env_chunk)
 
     config_path = 'configs/pipeline.yaml'
     if os.path.exists(config_path):
