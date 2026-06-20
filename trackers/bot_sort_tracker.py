@@ -168,10 +168,14 @@ class FootballBotSortTracker:
     # Minimum composite score to re-identify a lost player instead of creating
     # a new stable ID.  Score formula: 0.6*appearance + 0.3*motion + 0.1*iou.
     REID_MATCH_THRESHOLD: float = 0.35
-    # Hard cap: 10 outfield players × 2 teams + 2 goalkeepers = 22 total.
-    # A 23rd stable ID is never minted; detections beyond this limit are
-    # force-assigned to the best history match.
-    MAX_STABLE_IDS: int = 22
+    # Hard cap: 10 outfield players per team, no goalkeepers in the pool.
+    # Goalkeepers are tracked separately via GK_SLOT_A / GK_SLOT_B.
+    MAX_STABLE_IDS: int = 20
+    # Reserved stable IDs for goalkeepers — outside the 1..MAX_STABLE_IDS pool.
+    # No ReID embedding history is maintained for these slots; they are matched
+    # purely by spatial proximity (goalkeepers rarely leave their area).
+    GK_SLOT_A: int = 0   # first goalkeeper detected
+    GK_SLOT_B: int = 99  # second goalkeeper detected
 
     def __init__(
         self,
@@ -192,6 +196,10 @@ class FootballBotSortTracker:
         self._id_map: Dict[int, int] = {}
         # Counter for the next stable player ID to assign
         self._next_stable_id: int = 1
+        # Minimal position history for goalkeeper slots (no embedding needed)
+        self._gk_last_bbox: Dict[int, Optional[List[float]]] = {}
+        # GK slots already assigned this video
+        self._gk_slots_used: List[int] = []
 
     # ── History helpers ───────────────────────────────────────────────────────
 
@@ -274,6 +282,7 @@ class FootballBotSortTracker:
         detection_bbox: List[float],
         detection_embedding: np.ndarray,
         active_tracks: Dict[int, TrackHistory],
+        frame_num: int = 0,
     ) -> Tuple[Optional[int], float]:
         """Find the best matching active track for a new detection.
 
@@ -283,8 +292,13 @@ class FootballBotSortTracker:
                   + 0.3 × motion_similarity
                   + 0.1 × bbox_similarity
 
-        When two tracks compete for the same detection the caller should keep
-        the track with the higher score and place the other in a "lost" state.
+        A **hard spatial gate** is applied first: if the distance between the
+        detection and a candidate's last known position exceeds
+        ``ABS_MAX_SPEED × temporal_gap`` (in frames), that candidate is
+        unconditionally rejected regardless of appearance.  This prevents the
+        classic ID-switch where a player reappears with a new raw track ID and
+        is incorrectly re-identified with a player that was last seen in a
+        completely different area of the pitch.
 
         Parameters
         ----------
@@ -294,11 +308,15 @@ class FootballBotSortTracker:
             ReID embedding of the new detection (1280-dim, L2-normalised).
         active_tracks:
             Mapping ``{track_id: TrackHistory}`` of currently active tracks.
+        frame_num:
+            Current frame index, used together with ``hist.last_seen`` to
+            compute the temporal gap and the maximum physically plausible
+            displacement since the track was last observed.
 
         Returns
         -------
         (best_track_id, best_score) — ``best_track_id`` is ``None`` when
-        *active_tracks* is empty.
+        *active_tracks* is empty or every candidate fails the spatial gate.
         """
         best_id: Optional[int] = None
         best_score: float = -np.inf
@@ -308,20 +326,31 @@ class FootballBotSortTracker:
             if hist.bbox is None:
                 continue
 
-            # 1. Appearance similarity (cosine distance in embedding space)
-            gallery_emb = self._mean_embedding(tid)
-            app_sim = _cosine_similarity(detection_embedding, gallery_emb)
+            # ── 0. Hard spatial gate ──────────────────────────────────────
+            # Compute the temporal gap (frames) since this track was last seen.
+            gap = max(1, frame_num - hist.last_seen) if hist.last_seen >= 0 else 1
+            max_possible_dist = self.ABS_MAX_SPEED * gap
 
-            # 2. Motion similarity: penalise large spatial jumps
-            avg_speed = self._estimate_velocity(tid)
             prev_center = _bbox_center(hist.bbox)
             dist = float(np.sqrt(
                 (det_center[0] - prev_center[0]) ** 2 +
                 (det_center[1] - prev_center[1]) ** 2
             ))
+
+            # Reject candidate if jump is physically impossible given elapsed time
+            if dist > max_possible_dist:
+                continue
+
+            # 1. Appearance similarity (cosine distance in embedding space)
+            gallery_emb = self._mean_embedding(tid)
+            app_sim = _cosine_similarity(detection_embedding, gallery_emb)
+
+            # 2. Motion similarity: penalise large spatial jumps relative to
+            #    the player's estimated speed scaled by the temporal gap.
+            avg_speed = self._estimate_velocity(tid)
             ref_speed = (avg_speed * self.MAX_SPEED_FACTOR
                          if avg_speed > 0 else self.ABS_MAX_SPEED)
-            motion_sim = max(0.0, 1.0 - dist / (ref_speed + 1e-8))
+            motion_sim = max(0.0, 1.0 - dist / (ref_speed * gap + 1e-8))
 
             # 3. Bounding-box overlap
             bbox_sim = _bbox_iou(detection_bbox, hist.bbox)
@@ -391,7 +420,7 @@ class FootballBotSortTracker:
     def detect_frames(self, frames: List[np.ndarray]) -> list:
         """Run YOLO + BoT-SORT on every frame and return raw Ultralytics results."""
         results: list = []
-        batch_size = 1
+        batch_size = 4
         for i in range(0, len(frames), batch_size):
             batch = self.model.track(
                 frames[i:i + batch_size],
@@ -440,6 +469,8 @@ class FootballBotSortTracker:
         self._next_stable_id = 1
         self.player_history = {}
         self._id_switch_log = []
+        self._gk_last_bbox = {}
+        self._gk_slots_used = []
 
         print(
             f"    [get_object_tracks] No stub — running BoT-SORT on "
@@ -469,15 +500,71 @@ class FootballBotSortTracker:
                 cls_id = int(box.cls[0])
                 cls_name = cls_names.get(cls_id, '')
 
-                # Skip referees — their jersey colours are irrelevant for
-                # team assignment.  Goalkeepers are tracked alongside players
-                # and marked with ``is_goalkeeper=True``.
+                # Skip referees.
                 if cls_name == 'referee':
                     continue
 
                 raw_id = int(box.id[0]) if box.id is not None else -1
 
-                if cls_name in ('player', 'goalkeeper') and raw_id >= 0:
+                # ── Goalkeeper fast-path: reserved slots, no ReID ─────────
+                # Goalkeepers are assigned to GK_SLOT_A (0) or GK_SLOT_B (99)
+                # purely by spatial proximity.  No embedding history is kept so
+                # they cannot accidentally absorb an outfield player's identity.
+                if cls_name == 'goalkeeper' and raw_id >= 0:
+                    if raw_id in self._id_map:
+                        stable_id = self._id_map[raw_id]
+                    else:
+                        # Pick the closest available GK slot.
+                        cx = (bbox[0] + bbox[2]) / 2.0
+                        cy = (bbox[1] + bbox[3]) / 2.0
+                        all_slots = (self.GK_SLOT_A, self.GK_SLOT_B)
+                        free_slots = [s for s in all_slots
+                                      if s not in self._gk_slots_used]
+                        if free_slots:
+                            # Prefer the slot whose last known position is closest.
+                            best_slot = free_slots[0]
+                            best_d = float('inf')
+                            for s in free_slots:
+                                lb = self._gk_last_bbox.get(s)
+                                if lb is None:
+                                    best_slot = s
+                                    break
+                                scx = (lb[0] + lb[2]) / 2.0
+                                scy = (lb[1] + lb[3]) / 2.0
+                                d = ((cx - scx) ** 2 + (cy - scy) ** 2) ** 0.5
+                                if d < best_d:
+                                    best_d = d
+                                    best_slot = s
+                            stable_id = best_slot
+                            self._gk_slots_used.append(stable_id)
+                        else:
+                            # Both slots taken — assign to spatially closest slot.
+                            stable_id = self.GK_SLOT_A
+                            best_d = float('inf')
+                            for s in all_slots:
+                                lb = self._gk_last_bbox.get(s)
+                                if lb is None:
+                                    continue
+                                scx = (lb[0] + lb[2]) / 2.0
+                                scy = (lb[1] + lb[3]) / 2.0
+                                d = ((cx - scx) ** 2 + (cy - scy) ** 2) ** 0.5
+                                if d < best_d:
+                                    best_d = d
+                                    stable_id = s
+                        self._id_map[raw_id] = stable_id
+
+                    if stable_id in current_stable_ids:
+                        continue  # Only one GK per slot per frame
+                    current_stable_ids.add(stable_id)
+                    self._gk_last_bbox[stable_id] = bbox
+                    tracks["players"][frame_num][stable_id] = {
+                        "bbox": bbox,
+                        "is_goalkeeper": True,
+                    }
+                    continue  # Skip the outfield-player ReID path below
+
+                # ── Outfield-player path: full ReID + stable ID ──────────
+                if cls_name == 'player' and raw_id >= 0:
                     if raw_id in self._id_map:
                         stable_id = self._id_map[raw_id]
                         # Guard: if this stable_id was already claimed this frame
@@ -514,7 +601,7 @@ class FootballBotSortTracker:
                             crop = self._extract_crop(frames[frame_num], bbox)
                             emb = self.reid.extract(crop)
                             best_id, best_score = self.match_player(
-                                bbox, emb, lost_tracks
+                                bbox, emb, lost_tracks, frame_num=frame_num,
                             )
                         else:
                             best_id, best_score = None, -1.0
@@ -551,19 +638,22 @@ class FootballBotSortTracker:
                         self._id_map[raw_id] = stable_id
 
                     current_stable_ids.add(stable_id)
-                    track_entry: dict = {"bbox": bbox}
-                    if cls_name == 'goalkeeper':
-                        track_entry["is_goalkeeper"] = True
-                    tracks["players"][frame_num][stable_id] = track_entry
+                    tracks["players"][frame_num][stable_id] = {"bbox": bbox}
 
                 elif cls_name == 'ball':
                     tracks["ball"][frame_num][1] = {"bbox": bbox}
 
-            # Update ReID / position history using stable IDs
+            # Update ReID / position history for outfield players only
+            # (goalkeeper slots are excluded — they have no TrackHistory).
+            outfield_tracks = {
+                tid: info
+                for tid, info in tracks["players"][frame_num].items()
+                if tid not in (self.GK_SLOT_A, self.GK_SLOT_B)
+            }
             self._update_history(
                 frame_num,
                 frames[frame_num],
-                tracks["players"][frame_num],
+                outfield_tracks,
             )
 
         if stub_path:

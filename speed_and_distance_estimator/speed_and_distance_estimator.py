@@ -4,13 +4,13 @@ sys.path.append('../')
 from utils import measure_distance ,get_foot_position
 
 class SpeedAndDistance_Estimator():
-    def __init__(self):
-        self.frame_window=5
-        self.frame_rate=24
+    def __init__(self, frame_rate=24):
+        self.frame_window = 5
+        self.frame_rate = frame_rate
     
-    def add_speed_and_distance_to_tracks(self,tracks):
+    def add_speed_and_distance_to_tracks(self, tracks):
         print(f"    [SpeedAndDistance_Estimator] Computing speed and distance for players...")
-        total_distance= {}
+        total_distance = {}
 
         for object, object_tracks in tracks.items():
             if object == "ball" or object == "referees":
@@ -71,7 +71,38 @@ class SpeedAndDistance_Estimator():
                 tracks["ball"][frame_num_batch][1]['speed'] = speed_km_per_hour
                 tracks["ball"][frame_num_batch][1]['distance'] = total_ball_distance
 
-    def draw_speed_and_distance(self,frames,tracks):
+        # Apply EMA smoothing to player speed values to reduce the staircase
+        # artefact caused by constant speed within each fixed frame window.
+        self._smooth_speeds(tracks)
+
+    # EMA_ALPHA controls the smoothing strength: lower → smoother, higher → reactive
+    EMA_ALPHA: float = 0.3
+
+    def _smooth_speeds(self, tracks):
+        """Apply Exponential Moving Average smoothing to speed values in-place."""
+        for object_type, object_tracks in tracks.items():
+            if object_type in ('ball', 'referees'):
+                continue
+            all_ids = set()
+            for frame in object_tracks:
+                all_ids.update(frame.keys())
+            for track_id in all_ids:
+                smoothed = None
+                for frame in object_tracks:
+                    det = frame.get(track_id)
+                    if det is None:
+                        smoothed = None  # reset EMA on track gap
+                        continue
+                    raw = det.get('speed')
+                    if raw is None:
+                        continue
+                    if smoothed is None:
+                        smoothed = raw
+                    else:
+                        smoothed = self.EMA_ALPHA * raw + (1 - self.EMA_ALPHA) * smoothed
+                    det['speed'] = smoothed
+
+    def draw_speed_and_distance(self, frames, tracks):
         output_frames = []
         for frame_num, frame in enumerate(frames):
             for object, object_tracks in tracks.items():

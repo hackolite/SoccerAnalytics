@@ -15,7 +15,9 @@ pipeline:
   - team_clustering    # 6. Global KMeans(2) team assignment
   - team_side          # 7. Label teams as 'left' / 'right'
   - jersey             # 8. Jersey-number OCR (EasyOCR + tracklet vote)
-  - visualization      # 9. Draw all overlays
+  - formation          # 9. Formation detection (4-3-3 / 4-4-2 …)
+  - pressure           # 10. Pressure index + team compactness
+  - visualization      # 11. Draw all overlays
 
 # ── Module configs ──────────────────────────────────────────
 
@@ -50,7 +52,7 @@ ball:
 
 speed:
   frame_window: 5
-  frame_rate: 24
+  frame_rate: 24   # fallback; process_video reads actual fps from video
 
 team_clustering:
   n_sample_frames: 50
@@ -64,6 +66,19 @@ jersey:
   min_confidence: 0.4
   top_half_only: true
   vote_across_track: true
+
+# Formation detection: splits outfield players into n_lines depth zones
+# (def / mid / fwd) and derives a canonical label like "4-3-3".
+# Requires position_transformed (CalibrationModule must run first).
+formation:
+  n_lines: 3          # split into 3 lines (defenders / midfielders / forwards)
+  min_players: 5      # minimum visible outfield players per team per frame
+
+# Pressure index: counts opponents within pressure_radius metres of each player.
+# Also computes a team_compactness score (inverse mean pairwise distance).
+# Requires position_transformed (CalibrationModule must run first).
+pressure:
+  pressure_radius: 5.0   # metres
 
 visualization:
   show_interaction_graph: true
