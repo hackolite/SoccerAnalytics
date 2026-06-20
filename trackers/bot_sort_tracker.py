@@ -420,7 +420,7 @@ class FootballBotSortTracker:
     def detect_frames(self, frames: List[np.ndarray]) -> list:
         """Run YOLO + BoT-SORT on every frame and return raw Ultralytics results."""
         results: list = []
-        batch_size = 4
+        batch_size = 1
         for i in range(0, len(frames), batch_size):
             batch = self.model.track(
                 frames[i:i + batch_size],
