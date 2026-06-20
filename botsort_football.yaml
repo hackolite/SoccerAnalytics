@@ -17,8 +17,8 @@ new_track_thresh: 0.6
 
 # ── Track buffer ──────────────────────────────────────────────────────────────
 # Number of frames a "lost" track is kept alive before being permanently deleted.
-# 120 frames ≈ 4 s at 30 fps — long enough to survive typical occlusions.
-track_buffer: 120
+# 150 frames ≈ 5 s at 30 fps — long enough to survive typical occlusions.
+track_buffer: 150
 
 # ── Association thresholds ────────────────────────────────────────────────────
 # Maximum cost allowed in the Hungarian assignment step.
@@ -30,8 +30,9 @@ fuse_score: False
 
 # IoU-based spatial proximity gate for second-stage matching
 proximity_thresh: 0.5
-# Cosine appearance distance gate; detections with higher distance are rejected
-appearance_thresh: 0.25
+# Cosine appearance distance gate; detections with higher distance are rejected.
+# Raised from 0.25 → 0.35 to match the lowered ReID threshold in the Python layer.
+appearance_thresh: 0.35
 
 # ── Global Motion Compensation ────────────────────────────────────────────────
 # Method used by BoT-SORT's GMC module to estimate camera motion.
