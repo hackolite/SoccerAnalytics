@@ -119,7 +119,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-The annotated video will be saved to `output_videos/trimmed_live.mp4`.
+The annotated video will be saved to `output_videos/<your_video_name>.mp4`.
 
 ### 6 — Run standalone video inference (raw YOLO only)
 
@@ -135,6 +135,128 @@ source, edit the `model.predict(...)` call at the top of the file.
 
 The script prints each detected bounding box and, because `save=True` is set,
 Ultralytics also writes an annotated copy to `runs/detect/predict/`.
+
+---
+
+## Inference
+
+This section explains all the ways to run inference with SoccerAnalytics.
+
+---
+
+### Option 1 — Full pipeline (recommended)
+
+The full pipeline runs detection, tracking, team assignment, speed/distance
+estimation, and video annotation in one command:
+
+```bash
+python main.py
+```
+
+**How it works:**
+
+- If `configs/pipeline.yaml` exists (default), the **modular pipeline** is used.
+- Otherwise, the **legacy mode** is used (see below).
+
+**Input:** Any video file placed in `input_videos/` (supported formats: `.mp4`,
+`.avi`, `.mov`, `.mkv`).
+
+**Output:** Annotated video(s) saved to `output_videos/`, one per input file.
+
+---
+
+### Option 2 — Modular pipeline via `configs/pipeline.yaml`
+
+The modular pipeline is driven entirely by `configs/pipeline.yaml`.  You can
+enable, disable, or reorder stages without touching any Python code:
+
+```yaml
+# configs/pipeline.yaml
+pipeline:
+  - tracking        # YOLO detection + BoT-SORT
+  - camera          # Camera-movement compensation
+  - calibration     # Perspective transform → pitch coords
+  - ball            # Ball interpolation + possession
+  - speed           # Speed & distance per player
+  - team_clustering # Global KMeans(2) team colours
+  - team_side       # Label teams left/right
+  - jersey          # Jersey-number OCR
+  - visualization   # Draw all overlays
+```
+
+Key parameters you may want to change:
+
+| Section | Key | Default | Description |
+|---|---|---|---|
+| `tracking` | `model_path` | `models/soccer.onnx` | Path to your YOLO model |
+| `tracking` | `conf_threshold` | `0.1` | YOLO confidence threshold |
+| `calibration` | `pixel_vertices` | *(hardcoded)* | Four image corners for the homography |
+| `speed` | `frame_rate` | `24` | Frame rate of your input video |
+| `jersey` | `enabled` | `true` | Enable/disable jersey-number OCR |
+| `visualization` | `show_minimap` | `true` | Enable/disable minimap overlay |
+
+Run with the config active (the default):
+
+```bash
+python main.py
+```
+
+---
+
+### Option 3 — Legacy mode (no config file)
+
+If `configs/pipeline.yaml` is absent, `main.py` falls back to the legacy
+hard-coded flow:
+
+```bash
+# Remove or rename the config to trigger legacy mode
+mv configs/pipeline.yaml configs/pipeline.yaml.bak
+python main.py
+```
+
+The model path and tracker config are hard-coded to `models/soccer.onnx` and
+`botsort_football.yaml`.  All video files found in `input_videos/` are
+processed in alphabetical order.
+
+---
+
+### Option 4 — Standalone YOLO inference (detection only)
+
+Use `yolo_inference.py` when you only need raw YOLO detections without any
+tracking or analytics:
+
+```bash
+python yolo_inference.py
+```
+
+The script loads `models/soccer.onnx`, runs `model.predict()` on
+`input_videos/08fd33_4.mp4`, prints all bounding boxes to stdout, and writes
+an annotated clip to `runs/detect/predict/`.
+
+To run on a different video or model, edit the top of `yolo_inference.py`:
+
+```python
+model = YOLO('models/soccer.onnx', task='detect')
+results = model.predict('input_videos/your_video.mp4', save=True)
+```
+
+---
+
+### Stub caching and re-running inference
+
+Tracking and camera-movement results are cached as `.pkl` files in `stubs/`
+after the first run, so subsequent runs are much faster.
+
+| Action | How |
+|---|---|
+| Use cached results (default) | `read_from_stub=True` in `main.py` |
+| Force full recomputation | Delete the `.pkl` files in `stubs/`, or set `read_from_stub=False` |
+
+```bash
+# Force recomputation by clearing the cache
+rm stubs/*.pkl
+python main.py
+```
 
 ---
 
@@ -180,21 +302,6 @@ Example output frame (Team 1 = blue cursors / graph, Team 2 = red cursors / grap
 ---
 
 ## Usage Details
-
-### Stub caching
-
-On the first run, tracking and camera-movement results are computed and cached
-as pickle files in `stubs/`.  Subsequent runs load from the cache to save time.
-To force recomputation, delete the `.pkl` files or set `read_from_stub=False`
-in `main.py`.
-
-### Standalone inference
-
-See **Step 5** in [Getting Started](#getting-started) for the quick-start
-command.  Additional detail: `yolo_inference.py` calls
-`model.predict(..., save=True)`, which writes the annotated clip to
-`runs/detect/predict/` via Ultralytics' built-in export, and also prints
-every detected bounding box to stdout.
 
 ### Training a custom model
 

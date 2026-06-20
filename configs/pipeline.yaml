@@ -1,0 +1,73 @@
+# configs/pipeline.yaml
+# ───────────────────────────────────────────────────────────
+# Master pipeline config — inspired by sn-gamestate/soccernet.yaml
+#
+# The `pipeline` list declares the ordered stages.
+# Each stage name has a matching top-level section with its parameters.
+# Swap or remove stages here without touching any Python code.
+
+pipeline:
+  - tracking           # 1. YOLO detection + BoT-SORT (soccer.onnx)
+  - camera             # 2. Camera-movement compensation (LK optical flow)
+  - calibration        # 3. Perspective transform → pitch coordinates
+  - ball               # 4. Ball interpolation + possession assignment
+  - speed              # 5. Speed & cumulative distance per player
+  - team_clustering    # 6. Global KMeans(2) team assignment
+  - team_side          # 7. Label teams as 'left' / 'right'
+  - jersey             # 8. Jersey-number OCR (EasyOCR + tracklet vote)
+  - visualization      # 9. Draw all overlays
+
+# ── Module configs ──────────────────────────────────────────
+
+tracking:
+  model_path: models/soccer.onnx
+  config_path: botsort_football.yaml
+  stub_path: stubs/{video_name}_track_stubs.pkl
+  conf_threshold: 0.1
+  detect_referees: true
+  detect_gk: true
+
+camera:
+  stub_path: stubs/{video_name}_camera_movement_stub.pkl
+
+calibration:
+  # Hardcoded quadrilateral corners matching the training video.
+  # For production use, replace with automatic keypoint-based calibration
+  # (TVCalib / nbjw_calib style as used in sn-gamestate).
+  pixel_vertices:
+    - [110, 1035]
+    - [265,  275]
+    - [910,  260]
+    - [1640, 915]
+  court_length: 23.32   # metres (visible pitch segment)
+  court_width: 68.0     # metres
+  # Reuse last valid homography when a frame's point is out of bounds.
+  # Mirrors sn-gamestate's use_prev_homography flag for temporal stability.
+  use_prev_homography: true
+
+ball:
+  max_player_ball_distance: 70   # pixels
+
+speed:
+  frame_window: 5
+  frame_rate: 24
+
+team_clustering:
+  n_sample_frames: 50
+  n_init: 10
+
+team_side: {}   # no extra params
+
+jersey:
+  enabled: true
+  lang: ['en']
+  min_confidence: 0.4
+  top_half_only: true
+  vote_across_track: true
+
+visualization:
+  show_interaction_graph: true
+  show_minimap: true
+  show_camera_movement: true
+  show_speed: true
+  show_jersey_number: true   # prefer jersey number label over team_player_id

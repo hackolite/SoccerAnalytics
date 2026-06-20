@@ -426,26 +426,38 @@ def process_video(video_path, tracker):
 
 
 def main():
+    """Entry point — delegates to the new sn-gamestate-style Pipeline when a
+    config file is present, otherwise falls back to the legacy per-function
+    flow so existing stubs and behaviour are preserved.
+    """
     os.makedirs('stubs', exist_ok=True)
 
-    video_files = sorted([
-        f for f in glob.glob('input_videos/*')
-        if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS
-    ])
+    config_path = 'configs/pipeline.yaml'
+    if os.path.exists(config_path):
+        # ── New modular pipeline (sn-gamestate structure) ──────────────────
+        print(f"Using modular pipeline config: {config_path}")
+        from socceranalytics import Pipeline
+        pipeline = Pipeline.from_config(config_path)
+        pipeline.run('input_videos')
+    else:
+        # ── Legacy fallback ────────────────────────────────────────────────
+        video_files = sorted([
+            f for f in glob.glob('input_videos/*')
+            if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS
+        ])
 
-    if not video_files:
-        print("No video files found in 'input_videos/'. Supported formats:", VIDEO_EXTENSIONS)
-        return
+        if not video_files:
+            print("No video files found in 'input_videos/'. Supported formats:", VIDEO_EXTENSIONS)
+            return
 
-    print(f"Found {len(video_files)} video(s) to process: {video_files}")
+        print(f"Found {len(video_files)} video(s) to process: {video_files}")
 
-    # Initialize tracker once and reuse across videos
-    tracker = FootballBotSortTracker('models/soccer.onnx', config_path='botsort_football.yaml')
+        tracker = FootballBotSortTracker('models/soccer.onnx', config_path='botsort_football.yaml')
 
-    for video_path in video_files:
-        process_video(video_path, tracker)
+        for video_path in video_files:
+            process_video(video_path, tracker)
 
-    print("\nAll videos processed successfully.")
+        print("\nAll videos processed successfully.")
 
 
 if __name__ == '__main__':
