@@ -691,8 +691,10 @@ def main():
     if os.path.exists(config_path):
         # ── New modular pipeline (sn-gamestate structure) ──────────────────
         print(f"Using modular pipeline config: {config_path}")
+        if chunk_size:
+            print(f"Chunked mode enabled: CHUNK_SIZE={chunk_size} frames per chunk.")
         from socceranalytics import Pipeline
-        pipeline = Pipeline.from_config(config_path)
+        pipeline = Pipeline.from_config(config_path, chunk_size=chunk_size)
         pipeline.run('input_videos')
     else:
         # ── Legacy fallback ────────────────────────────────────────────────
