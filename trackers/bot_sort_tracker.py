@@ -156,7 +156,7 @@ class FootballBotSortTracker:
     """
 
     # Number of frames a lost track is retained
-    MAX_LOST_FRAMES: int = 120
+    MAX_LOST_FRAMES: int = 150
     # Rolling window for velocity estimation
     VEL_WINDOW: int = 10
     # A position jump greater than ``MAX_SPEED_FACTOR × avg_speed`` is flagged
@@ -164,10 +164,14 @@ class FootballBotSortTracker:
     # Hard cap on pixel displacement per frame (tribune camera, zoomed out)
     ABS_MAX_SPEED: float = 80.0
     # Number of recent embeddings averaged to form the appearance gallery
-    GALLERY_SIZE: int = 10
+    # Larger gallery → more robust against per-frame noise (jersey occlusion,
+    # motion blur).  Inspired by SoccerNet winning approaches.
+    GALLERY_SIZE: int = 20
     # Minimum composite score to re-identify a lost player instead of creating
-    # a new stable ID.  Score formula: 0.6*appearance + 0.3*motion + 0.1*iou.
-    REID_MATCH_THRESHOLD: float = 0.35
+    # a new stable ID.  Score formula: 0.55*appearance + 0.35*motion + 0.10*iou.
+    # Lowered from 0.35 → 0.22 to make ReID more permissive — players with
+    # similar jersey colours will now be re-associated more easily.
+    REID_MATCH_THRESHOLD: float = 0.22
     # Hard cap: 10 outfield players per team, no goalkeepers in the pool.
     # Goalkeepers are tracked separately via GK_SLOT_A / GK_SLOT_B.
     MAX_STABLE_IDS: int = 20
@@ -200,6 +204,51 @@ class FootballBotSortTracker:
         self._gk_last_bbox: Dict[int, Optional[List[float]]] = {}
         # GK slots already assigned this video
         self._gk_slots_used: List[int] = []
+
+    # ── Zone-based fallback ───────────────────────────────────────────────────
+
+    def _zone_fallback_id(
+        self,
+        detection_bbox: List[float],
+        exclude_ids: set,
+    ) -> Optional[int]:
+        """Return the stable ID whose last known position is nearest the detection.
+
+        Used as a last resort when the ID cap is reached and no candidate
+        passes the ReID threshold.  Picks the closest *unoccupied* stable
+        player ID from the position gallery so we never introduce a duplicate.
+
+        Parameters
+        ----------
+        detection_bbox:
+            Bounding box of the unmatched detection [x1, y1, x2, y2].
+        exclude_ids:
+            Set of stable IDs that are already claimed in the current frame
+            (must not be reused to avoid duplicates).
+
+        Returns
+        -------
+        The best stable ID, or ``None`` when no candidate is available.
+        """
+        det_cx = (detection_bbox[0] + detection_bbox[2]) / 2.0
+        det_cy = (detection_bbox[1] + detection_bbox[3]) / 2.0
+
+        best_id: Optional[int] = None
+        best_dist: float = float('inf')
+
+        for sid, hist in self.player_history.items():
+            if sid in exclude_ids:
+                continue
+            if hist.bbox is None:
+                continue
+            scx = (hist.bbox[0] + hist.bbox[2]) / 2.0
+            scy = (hist.bbox[1] + hist.bbox[3]) / 2.0
+            dist = float(np.sqrt((det_cx - scx) ** 2 + (det_cy - scy) ** 2))
+            if dist < best_dist:
+                best_dist = dist
+                best_id = sid
+
+        return best_id
 
     # ── History helpers ───────────────────────────────────────────────────────
 
@@ -355,9 +404,11 @@ class FootballBotSortTracker:
             # 3. Bounding-box overlap
             bbox_sim = _bbox_iou(detection_bbox, hist.bbox)
 
-            score = (0.6 * app_sim +
-                     0.3 * motion_sim +
-                     0.1 * bbox_sim)
+            # SoccerNet-inspired weight mix: reduce pure-appearance dominance
+            # (jerseys of the same team look alike) and increase spatial weight.
+            score = (0.55 * app_sim +
+                     0.35 * motion_sim +
+                     0.10 * bbox_sim)
 
             if score > best_score:
                 best_score = score
@@ -623,14 +674,25 @@ class FootballBotSortTracker:
                                     raw_id, stable_id, best_score,
                                 )
                         elif cap_reached:
-                            # No re-id candidate available and cap reached.
-                            # Skip rather than duplicate an existing ID.
-                            logger.warning(
-                                "ID cap reached with no free candidate — "
-                                "suppressing raw=%d",
-                                raw_id,
-                            )
-                            continue
+                            # No re-id candidate above threshold and cap reached.
+                            # Fall back to zone-based assignment: pick the stable ID
+                            # whose last known position is closest to this detection,
+                            # provided it is not already used in this frame (no duplicate).
+                            zone_id = self._zone_fallback_id(bbox, current_stable_ids)
+                            if zone_id is not None:
+                                stable_id = zone_id
+                                logger.info(
+                                    "Zone fallback: raw=%d → stable=%d "
+                                    "(nearest lost player in area)",
+                                    raw_id, stable_id,
+                                )
+                            else:
+                                logger.warning(
+                                    "ID cap reached with no zone candidate — "
+                                    "suppressing raw=%d",
+                                    raw_id,
+                                )
+                                continue
                         else:
                             stable_id = self._next_stable_id
                             self._next_stable_id += 1
