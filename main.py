@@ -5,7 +5,7 @@ import tempfile
 import warnings
 
 from utils import read_video, save_video, get_video_info, read_video_chunk, read_video_sampled, concatenate_videos
-from trackers import FootballBotSortTracker
+from trackers import FootballBotSortTracker, refine_tracklets
 import cv2
 import numpy as np
 from team_assigner import TeamAssigner
@@ -361,6 +361,13 @@ def _process_chunk(video_frames, tracker, chunk_idx, video_name,
 
     speed_and_distance_estimator = SpeedAndDistance_Estimator()
     speed_and_distance_estimator.add_speed_and_distance_to_tracks(tracks)
+
+    # GTA Lite: post-traitement d'association globale de tracklets.
+    # Doit être appelé après que les positions ajustées sont disponibles et
+    # avant l'attribution des équipes pour que les IDs soient stables.
+    n_merges = refine_tracklets(tracks)
+    if n_merges:
+        print(f"    [gta_lite] {n_merges} fusion(s) de tracklets appliquée(s).")
 
     # Team assignment: reuse the globally pre-fitted model when available.
     if pre_fitted_team_assigner is not None:
