@@ -1,5 +1,6 @@
 from sklearn.cluster import KMeans
 import numpy as np
+import cv2
 
 class TeamAssigner:
     def __init__(self):
@@ -17,27 +18,58 @@ class TeamAssigner:
 
         return kmeans
 
-    def get_player_color(self,frame,bbox):
-        image = frame[int(bbox[1]):int(bbox[3]),int(bbox[0]):int(bbox[2])]
+    def get_player_color(self, frame, bbox):
+        image = frame[int(bbox[1]):int(bbox[3]), int(bbox[0]):int(bbox[2])]
+        top_half_image = image[0:int(image.shape[0] / 2), :]
 
-        top_half_image = image[0:int(image.shape[0]/2),:]
+        # ── Mask out pitch-green pixels before clustering ─────────────────
+        # Grass has a well-defined hue range (35–85 in OpenCV's 0–179 scale).
+        # Removing these pixels prevents the background from polluting the
+        # jersey-colour centroids, which is especially important for players
+        # standing close to the pitch boundary.
+        hsv = cv2.cvtColor(top_half_image, cv2.COLOR_BGR2HSV)
+        green_mask = cv2.inRange(
+            hsv,
+            np.array([35, 50, 50], dtype=np.uint8),
+            np.array([85, 255, 255], dtype=np.uint8),
+        )
+        non_green_pixels = top_half_image[green_mask == 0]
+        # Fall back to all pixels when too few non-green pixels are available
+        # (e.g. small or partially off-screen crop).
+        fit_pixels = non_green_pixels if len(non_green_pixels) >= 10 else top_half_image.reshape(-1, 3)
 
-        # Get Clustering model
-        kmeans = self.get_clustering_model(top_half_image)
+        # ── Convert to CIE Lab for perceptually uniform clustering ─────────
+        # Lab separates luminance from chroma, making colour differences map
+        # to perceived distances — team jerseys cluster more tightly than in BGR.
+        fit_lab = cv2.cvtColor(
+            fit_pixels.reshape(-1, 1, 3).astype(np.uint8),
+            cv2.COLOR_BGR2LAB,
+        ).reshape(-1, 3).astype(np.float32)
 
-        # Get the cluster labels forr each pixel
-        labels = kmeans.labels_
+        kmeans = KMeans(n_clusters=2, init='k-means++', n_init=1)
+        kmeans.fit(fit_lab)
 
-        # Reshape the labels to the image shape
-        clustered_image = labels.reshape(top_half_image.shape[0],top_half_image.shape[1])
+        # Predict labels for all top-half pixels so we can use the corner
+        # heuristic on the full spatial grid (not just non-green ones).
+        all_lab = cv2.cvtColor(
+            top_half_image.reshape(-1, 1, 3).astype(np.uint8),
+            cv2.COLOR_BGR2LAB,
+        ).reshape(-1, 3).astype(np.float32)
+        labels = kmeans.predict(all_lab)
+        clustered_image = labels.reshape(top_half_image.shape[0], top_half_image.shape[1])
 
-        # Get the player cluster
-        corner_clusters = [clustered_image[0,0],clustered_image[0,-1],clustered_image[-1,0],clustered_image[-1,-1]]
-        non_player_cluster = max(set(corner_clusters),key=corner_clusters.count)
+        # Corner pixels are more likely background (sky / grass / stands).
+        corner_clusters = [
+            clustered_image[0, 0], clustered_image[0, -1],
+            clustered_image[-1, 0], clustered_image[-1, -1],
+        ]
+        non_player_cluster = max(set(corner_clusters), key=corner_clusters.count)
         player_cluster = 1 - non_player_cluster
 
-        player_color = kmeans.cluster_centers_[player_cluster]
-
+        # Return the cluster centre converted back to BGR so the rest of the
+        # pipeline (which expects BGR colours) stays unchanged.
+        player_lab = kmeans.cluster_centers_[player_cluster].reshape(1, 1, 3).astype(np.uint8)
+        player_color = cv2.cvtColor(player_lab, cv2.COLOR_LAB2BGR).reshape(3).astype(np.float64)
         return player_color
 
     def assign_teams_global(self, frames, tracks_players):

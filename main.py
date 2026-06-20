@@ -324,7 +324,7 @@ DEFAULT_CHUNK_SIZE = 500
 
 
 def _process_chunk(video_frames, tracker, chunk_idx, video_name,
-                   pre_fitted_team_assigner=None):
+                   pre_fitted_team_assigner=None, frame_rate=24):
     """Run the full analysis pipeline on a pre-loaded list of *video_frames*.
 
     This is an internal helper shared by both the monolithic and chunked paths.
@@ -359,7 +359,7 @@ def _process_chunk(video_frames, tracker, chunk_idx, video_name,
 
     tracks["ball"] = tracker.interpolate_ball_positions(tracks["ball"])
 
-    speed_and_distance_estimator = SpeedAndDistance_Estimator()
+    speed_and_distance_estimator = SpeedAndDistance_Estimator(frame_rate=frame_rate)
     speed_and_distance_estimator.add_speed_and_distance_to_tracks(tracks)
 
     # GTA Lite: post-traitement d'association globale de tracklets.
@@ -438,10 +438,11 @@ def process_video_chunked(video_path, tracker, chunk_size):
 
     info = get_video_info(video_path)
     total_frames = info['frame_count']
+    frame_rate = info.get('fps', 24)
     n_chunks = (total_frames + chunk_size - 1) // chunk_size
 
     print(f"\n=== Processing (chunked): {video_path} ===")
-    print(f"    Total frames: {total_frames}  |  chunk_size: {chunk_size}  |  chunks: {n_chunks}")
+    print(f"    Total frames: {total_frames}  |  chunk_size: {chunk_size}  |  chunks: {n_chunks}  |  fps: {frame_rate}")
 
     # ------------------------------------------------------------------
     # Global team-colour sampling — reads only 50 frames from the whole
@@ -509,6 +510,7 @@ def process_video_chunked(video_path, tracker, chunk_size):
             output_frames = _process_chunk(
                 video_frames, tracker, chunk_idx, video_name,
                 pre_fitted_team_assigner=pre_fitted,
+                frame_rate=frame_rate,
             )
 
             chunk_path = os.path.join(tmp_dir, f'chunk_{chunk_idx:04d}.mp4')
@@ -557,10 +559,12 @@ def process_video(video_path, tracker, chunk_size=None):
 
     print(f"\n=== Processing: {video_path} ===")
 
-    # Read Video
+    # Read Video (also get fps for accurate speed computation)
     print(f"  [1/8] Reading video frames from '{video_path}'...")
+    video_info = get_video_info(video_path)
+    frame_rate = video_info.get('fps', 24)
     video_frames = read_video(video_path)
-    print(f"        -> {len(video_frames)} frames loaded.")
+    print(f"        -> {len(video_frames)} frames loaded (fps={frame_rate}).")
 
     print(f"  [2/8] Running object tracking...")
     tracks = tracker.get_object_tracks(video_frames,
@@ -594,7 +598,7 @@ def process_video(video_path, tracker, chunk_size=None):
 
     # Speed and distance estimator
     print(f"  [6/8] Computing speed and distance...")
-    speed_and_distance_estimator = SpeedAndDistance_Estimator()
+    speed_and_distance_estimator = SpeedAndDistance_Estimator(frame_rate=frame_rate)
     speed_and_distance_estimator.add_speed_and_distance_to_tracks(tracks)
     print(f"        -> Speed and distance computed.")
 

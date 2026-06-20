@@ -9,6 +9,7 @@ from .jersey import JerseyOCRModule
 from .ball import BallModule
 from .speed import SpeedDistanceModule
 from .visualization import VisualizationModule
+from .analytics import FormationAnalyticsModule, PressureIndexModule
 
 __all__ = [
     'BaseModule',
@@ -24,4 +25,6 @@ __all__ = [
     'BallModule',
     'SpeedDistanceModule',
     'VisualizationModule',
+    'FormationAnalyticsModule',
+    'PressureIndexModule',
 ]

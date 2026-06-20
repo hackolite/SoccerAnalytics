@@ -64,6 +64,8 @@ from .modules import (
     BallModule,
     SpeedDistanceModule,
     VisualizationModule,
+    FormationAnalyticsModule,
+    PressureIndexModule,
 )
 
 # Registry: module name → class
@@ -79,6 +81,9 @@ _MODULE_REGISTRY: Dict[str, Any] = {
     'visualization':    VisualizationModule,
     # Alias used by ball interpolation stage
     'ball_interpolation': BallModule,
+    # Advanced analytics modules
+    'formation':        FormationAnalyticsModule,
+    'pressure':         PressureIndexModule,
 }
 
 
