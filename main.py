@@ -19,38 +19,32 @@ VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv')
 
 
 def assign_team_player_ids(tracks):
-    """Assign stable per-team IDs to each player and compute nearest teammate ID.
+    """Assign stable per-team IDs to each player and referee.
 
     Each team gets its own ID counter that resets from 1, with a letter prefix:
-    team 1 → 'a1' … 'a10', team 2 → 'b1' … 'b10'.  The mapping is built in
-    first-appearance order and kept consistent across all frames.  Two new keys
-    are added to every player entry:
-      - 'team_player_id'     : str 'a1'-'a10' or 'b1'-'b10'
+    team 1 → 'a1' … 'a10', team 2 → 'b1' … 'b10'.  Not all IDs are
+    necessarily assigned — if fewer than 10 outfield players are detected for
+    a team, only the IDs actually needed are used.  Extra tracker IDs beyond
+    the first 10 per team receive no ``team_player_id``.  Two new keys are
+    added to every player entry that has been assigned an ID:
+      - 'team_player_id'     : str 'a1'-'a10', 'b1'-'b10', or '0'
       - 'nearest_teammate_id': str of the spatially closest teammate, or None
+
+    Goalkeepers and referees always receive the special ID ``'0'``.
 
     Strict invariants enforced at every stage:
       - 'a'-prefixed IDs are only ever assigned to team-1 players.
       - 'b'-prefixed IDs are only ever assigned to team-2 players.
-      - No two tracker IDs receive the same team_player_id unless all 10 IDs
-        of a team have already been claimed (last-resort duplicate allowed only
-        when the pool is fully exhausted).
+      - No two tracker IDs ever share the same team_player_id (no duplicates).
 
     Team membership is determined by majority vote across all frames in which
     a player appears, making the assignment robust to per-frame noise from the
     colour-clustering team assigner.
-
-    When the team pool is not yet exhausted, extra players inherit the ID of
-    the nearest available same-team player (spatial distance from average
-    position across all frames).  When every ID in the pool has been claimed,
-    the extra player is assigned the ID of the spatially+temporally closest
-    same-team player (duplicate allowed as last resort, strictly within the
-    same team).
     """
     TEAM_PREFIX = {1: 'a', 2: 'b'}
 
-    # --- Preliminary pass: collect team votes and full position history ---
+    # --- Preliminary pass: collect team votes ---
     player_team_votes = {}  # {player_id: {team: frame_count}}
-    position_history = {}   # {player_id: [pos, ...]}
     first_frame = {}        # {player_id: frame_index} for first-appearance ordering
     goalkeeper_ids = set()  # player IDs flagged as goalkeepers
 
@@ -64,9 +58,6 @@ def assign_team_player_ids(tracks):
             if team is not None:
                 votes = player_team_votes.setdefault(player_id, {})
                 votes[team] = votes.get(team, 0) + 1
-            pos = player_info.get('position_adjusted') or player_info.get('position')
-            if pos is not None:
-                position_history.setdefault(player_id, []).append(pos)
 
     # Derive stable team from majority vote across all frames.
     # Using all frames (not just the first) makes the mapping robust to
@@ -74,14 +65,6 @@ def assign_team_player_ids(tracks):
     player_teams = {}
     for player_id, votes in player_team_votes.items():
         player_teams[player_id] = max(votes, key=votes.get)
-
-    def avg_pos(player_id):
-        """Return the average (x, y) position across all recorded frames."""
-        hist = position_history.get(player_id)
-        if not hist:
-            return None
-        return (sum(p[0] for p in hist) / len(hist),
-                sum(p[1] for p in hist) / len(hist))
 
     # --- Assign goalkeeper IDs first ('0'), one per team ---
     # Goalkeepers are excluded from the outfield 10-player pool so they
@@ -118,149 +101,9 @@ def assign_team_player_ids(tracks):
         """Return the single letter that all IDs for *team* must start with."""
         return TEAM_PREFIX.get(team, '')
 
-    # --- Recycle IDs for extra outfield players using average position history ---
-    # Each existing ID may be recycled at most once (no-duplicate rule).
-    # Safety: only IDs whose prefix matches the player's team are considered.
-    # Goalkeeper IDs ('ag' / 'bg') are never recycled to outfield players.
-    recycled_ids = set()
-
-    for player_id in sorted(first_frame, key=first_frame.__getitem__):
-        if player_id in team_player_id_map:
-            continue
-        if player_id in goalkeeper_ids:
-            continue
-        team = player_teams.get(player_id)
-        if team is None:
-            continue
-        pos = avg_pos(player_id)
-        if pos is None:
-            continue
-
-        expected_prefix = _expected_prefix(team)
-        best_id = None
-        min_dist = float('inf')
-        for existing_pid, existing_tpid in team_player_id_map.items():
-            # Skip goalkeeper IDs ('0') — they must not be recycled to outfield players.
-            if existing_tpid == '0':
-                continue
-            # Strict team check — 'a' IDs with team-1 players, 'b' with team-2.
-            if player_teams.get(existing_pid) != team:
-                continue
-            if not existing_tpid.startswith(expected_prefix):
-                continue
-            if existing_tpid in recycled_ids:
-                continue
-            existing_pos = avg_pos(existing_pid)
-            if existing_pos is None:
-                continue
-            dist = ((pos[0] - existing_pos[0]) ** 2 + (pos[1] - existing_pos[1]) ** 2) ** 0.5
-            if dist < min_dist:
-                min_dist = dist
-                best_id = existing_tpid
-
-        if best_id is not None:
-            team_player_id_map[player_id] = best_id
-            recycled_ids.add(best_id)
-
-    # --- Fallback: players still without ID after recycling ---
-    # Strict invariants:
-    #   1. 'a'-prefixed IDs → team 1 only; 'b'-prefixed IDs → team 2 only.
-    #      Cross-team assignment is never performed; prefix is validated
-    #      explicitly on every candidate before selection.
-    #   2. Duplicates are avoided by tracking which IDs have already been
-    #      claimed in this pass.  When the closest candidate's ID is already
-    #      taken, the next-closest same-team candidate is tried instead.
-    #   3. Only when *all* same-team IDs are exhausted is a duplicate allowed
-    #      (last resort), still strictly within the same team.
-    #   4. Players whose team is unknown are skipped — no ID is assigned.
-
-    def _closest_from_history(player_id, restrict_team, excluded_ids=None):
-        """Return the team_player_id of the historically closest eligible player.
-
-        Combines Euclidean spatial distance (pixels, using average position)
-        with temporal distance (frame-index difference) into a single score.
-        Candidates whose team_player_id is in *excluded_ids* are skipped.
-        Goalkeeper IDs (ending with 'g') are never returned as candidates.
-        Prefix is validated so that only IDs matching *restrict_team*'s
-        expected letter are considered (no cross-team contamination).
-        Returns None when no eligible candidate exists in *team_player_id_map*.
-        """
-        pos = avg_pos(player_id)
-        frame_idx = first_frame[player_id]
-        expected_prefix = _expected_prefix(restrict_team) if restrict_team is not None else None
-        best_id = None
-        min_score = float('inf')
-        for existing_pid, existing_tpid in team_player_id_map.items():
-            # Never recycle goalkeeper IDs ('0') to outfield players.
-            if existing_tpid == '0':
-                continue
-            if restrict_team is not None and player_teams.get(existing_pid) != restrict_team:
-                continue
-            # Explicit prefix guard — ensures 'a' IDs stay with team 1 and
-            # 'b' IDs stay with team 2, even in the fallback pass.
-            if expected_prefix and not existing_tpid.startswith(expected_prefix):
-                continue
-            if excluded_ids and existing_tpid in excluded_ids:
-                continue
-            existing_pos = avg_pos(existing_pid)
-            existing_frame = first_frame.get(existing_pid, 0)
-            if pos is not None and existing_pos is not None:
-                spatial = ((pos[0] - existing_pos[0]) ** 2 +
-                           (pos[1] - existing_pos[1]) ** 2) ** 0.5
-            else:
-                spatial = 0.0
-            temporal = abs(frame_idx - existing_frame)
-            score = spatial + temporal
-            if score < min_score:
-                min_score = score
-                best_id = existing_tpid
-        return best_id
-
-    # Track which IDs have already been claimed in the fallback pass (per team).
-    fallback_used_ids: dict[int, set] = {}
-
-    for player_id in sorted(first_frame, key=first_frame.__getitem__):
-        if player_id in team_player_id_map:
-            continue
-        if player_id in goalkeeper_ids:
-            continue
-        team = player_teams.get(player_id)
-        if team is None:
-            # Unknown team: skip — never assign a cross-team or arbitrary ID.
-            continue
-
-        used = fallback_used_ids.setdefault(team, set())
-
-        # Try to find the closest same-team ID that is not yet claimed.
-        best_id = _closest_from_history(player_id, restrict_team=team,
-                                        excluded_ids=used)
-        if best_id is None:
-            # All same-team IDs are exhausted: allow a duplicate as last resort,
-            # but still strictly within the same team (no cross-team assignment).
-            best_id = _closest_from_history(player_id, restrict_team=team,
-                                            excluded_ids=None)
-
-        if best_id is not None:
-            team_player_id_map[player_id] = best_id
-            used.add(best_id)
-
-    # --- Rigorous invariant checks ---
-    # 1. Every tracked player with a known team MUST have a team_player_id.
-    missing_ids = [pid for pid in first_frame
-                   if pid not in team_player_id_map and player_teams.get(pid) is not None]
-    if missing_ids:
-        warnings.warn(
-            f"assign_team_player_ids: {len(missing_ids)} player(s) still without "
-            f"a team_player_id after all assignment passes "
-            f"(first 10: {missing_ids[:10]}{'...' if len(missing_ids) > 10 else ''}). "
-            "This should not happen — check team assignment and tracking data.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-
-    # 2. Prefix-team consistency: 'a' IDs must belong to team 1 only,
-    #    'b' IDs must belong to team 2 only.  Goalkeeper IDs ('0') are
-    #    exempt from the prefix check.  Any other violation is a bug.
+    # --- Invariant check: prefix-team consistency ---
+    # 'a' IDs must belong to team 1 only, 'b' IDs to team 2 only.
+    # Goalkeeper IDs ('0') are exempt.  Any other violation is a bug.
     cross_team = [
         (pid, tpid, player_teams.get(pid))
         for pid, tpid in team_player_id_map.items()
@@ -277,6 +120,11 @@ def assign_team_player_ids(tracks):
             RuntimeWarning,
             stacklevel=2,
         )
+
+    # --- Assign '0' to all referees ---
+    for frame_num, referee_track in enumerate(tracks.get('referees', [])):
+        for referee_id in referee_track:
+            tracks['referees'][frame_num][referee_id]['team_player_id'] = '0'
 
     # Apply IDs and compute nearest teammate for every frame
     for frame_num, player_track in enumerate(tracks['players']):
