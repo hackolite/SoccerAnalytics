@@ -1,8 +1,10 @@
 import os
 import glob
+import shutil
+import tempfile
 import warnings
 
-from utils import read_video, save_video
+from utils import read_video, save_video, get_video_info, read_video_chunk, read_video_sampled, concatenate_videos
 from trackers import FootballBotSortTracker
 import cv2
 import numpy as np
@@ -314,7 +316,233 @@ def assign_team_player_ids(tracks):
             tracks['players'][frame_num][player_id]['nearest_teammate_id'] = nearest_tpid
 
 
-def process_video(video_path, tracker):
+# ---------------------------------------------------------------------------
+# Default chunk size (frames).  Override via the CHUNK_SIZE environment
+# variable or by passing chunk_size explicitly to process_video().
+# ---------------------------------------------------------------------------
+DEFAULT_CHUNK_SIZE = 500
+
+
+def _process_chunk(video_frames, tracker, chunk_idx, video_name,
+                   pre_fitted_team_assigner=None):
+    """Run the full analysis pipeline on a pre-loaded list of *video_frames*.
+
+    This is an internal helper shared by both the monolithic and chunked paths.
+    When *pre_fitted_team_assigner* is supplied its KMeans model is reused so
+    that team colours stay consistent across chunks.
+
+    Returns
+    -------
+    list of numpy.ndarray
+        Annotated output frames for this chunk.
+    """
+    # Build per-chunk stub paths so each chunk can be cached independently.
+    chunk_suffix = f'_chunk{chunk_idx}' if chunk_idx is not None else ''
+    track_stub = os.path.join('stubs', f'{video_name}{chunk_suffix}_track_stubs.pkl')
+    camera_stub = os.path.join('stubs', f'{video_name}{chunk_suffix}_camera_movement_stub.pkl')
+
+    tracks = tracker.get_object_tracks(video_frames,
+                                       read_from_stub=True,
+                                       stub_path=track_stub)
+    tracker.add_position_to_tracks(tracks)
+
+    camera_movement_estimator = CameraMovementEstimator(video_frames[0])
+    camera_movement_per_frame = camera_movement_estimator.get_camera_movement(
+        video_frames,
+        read_from_stub=True,
+        stub_path=camera_stub,
+    )
+    camera_movement_estimator.add_adjust_positions_to_tracks(tracks, camera_movement_per_frame)
+
+    view_transformer = ViewTransformer()
+    view_transformer.add_transformed_position_to_tracks(tracks)
+
+    tracks["ball"] = tracker.interpolate_ball_positions(tracks["ball"])
+
+    speed_and_distance_estimator = SpeedAndDistance_Estimator()
+    speed_and_distance_estimator.add_speed_and_distance_to_tracks(tracks)
+
+    # Team assignment: reuse the globally pre-fitted model when available.
+    if pre_fitted_team_assigner is not None:
+        team_assigner = pre_fitted_team_assigner
+        team_map = team_assigner.assign_teams_global(video_frames, tracks['players'])
+    else:
+        team_assigner = TeamAssigner()
+        team_map = team_assigner.assign_teams_global(video_frames, tracks['players'])
+
+    for frame_num, player_track in enumerate(tracks['players']):
+        for player_id, track in player_track.items():
+            team = team_map.get(
+                player_id,
+                team_assigner.get_player_team(video_frames[frame_num], track['bbox'], player_id),
+            )
+            tracks['players'][frame_num][player_id]['team'] = team
+            tracks['players'][frame_num][player_id]['team_color'] = team_assigner.team_colors[team]
+
+    assign_team_player_ids(tracks)
+
+    player_assigner = PlayerBallAssigner()
+    team_ball_control = []
+    for frame_num, player_track in enumerate(tracks['players']):
+        ball_bbox = tracks['ball'][frame_num][1]['bbox']
+        assigned_player = player_assigner.assign_ball_to_player(player_track, ball_bbox)
+
+        if assigned_player != -1:
+            tracks['players'][frame_num][assigned_player]['has_ball'] = True
+            team_ball_control.append(tracks['players'][frame_num][assigned_player]['team'])
+        else:
+            team_ball_control.append(team_ball_control[-1] if team_ball_control else 0)
+    team_ball_control = np.array(team_ball_control)
+
+    output_video_frames = tracker.draw_annotations(video_frames, tracks, team_ball_control)
+    output_video_frames = camera_movement_estimator.draw_camera_movement(output_video_frames, camera_movement_per_frame)
+    speed_and_distance_estimator.draw_speed_and_distance(output_video_frames, tracks)
+    minimap = MiniMap()
+    output_video_frames = minimap.draw_minimap(output_video_frames, tracks)
+
+    return output_video_frames
+
+
+def process_video_chunked(video_path, tracker, chunk_size):
+    """Process a video in frame-range chunks to limit peak memory usage.
+
+    The video is split into non-overlapping chunks of *chunk_size* frames.
+    Each chunk is analysed independently and saved to a temporary file.
+    After all chunks have been processed the temporary files are concatenated
+    into the final output and the temporaries are deleted.
+
+    Team colours are determined from a lightweight global sampling pass
+    (50 evenly-spaced frames, no full load) so they remain consistent across
+    chunks.
+
+    Parameters
+    ----------
+    video_path:
+        Path to the input video.
+    tracker:
+        An initialised ``FootballBotSortTracker`` instance.
+    chunk_size:
+        Maximum number of frames per chunk.
+    """
+    video_name = os.path.splitext(os.path.basename(video_path))[0]
+    output_path = os.path.join('output_videos', os.path.basename(video_path))
+    os.makedirs('output_videos', exist_ok=True)
+    os.makedirs('stubs', exist_ok=True)
+
+    info = get_video_info(video_path)
+    total_frames = info['frame_count']
+    n_chunks = (total_frames + chunk_size - 1) // chunk_size
+
+    print(f"\n=== Processing (chunked): {video_path} ===")
+    print(f"    Total frames: {total_frames}  |  chunk_size: {chunk_size}  |  chunks: {n_chunks}")
+
+    # ------------------------------------------------------------------
+    # Global team-colour sampling — reads only 50 frames from the whole
+    # video so team colours stay consistent across all chunks.
+    # ------------------------------------------------------------------
+    print("  [pre] Sampling frames for global team-colour fitting...")
+    sampled = read_video_sampled(video_path, n_samples=50)
+
+    if sampled:
+        # Build a minimal tracks_players structure for assign_teams_global:
+        # we need it to map frame indices to player bboxes.  We run a quick
+        # detection pass on the sampled frames only.
+        sampled_frames = [f for _, f in sampled]
+        sampled_indices = [idx for idx, _ in sampled]
+
+        # Detect on sampled frames (tiny subset, low memory cost).
+        sampled_detections = tracker.detect_frames(sampled_frames)
+
+        import supervision as _sv  # noqa: E402 — available via tracker install
+        cls_names_inv = {}
+        pseudo_tracks = []
+        for det in sampled_detections:
+            cls_names = det.names
+            cls_names_inv = {v: k for k, v in cls_names.items()}
+            keep = {cls_names_inv.get(c) for c in ('player', 'goalkeeper')
+                    if c in cls_names_inv}
+            det_sv = _sv.Detections.from_ultralytics(det)
+            frame_dict = {}
+            for box_id, (box, cls_id) in enumerate(
+                zip(det_sv.xyxy, det_sv.class_id)
+            ):
+                if cls_id not in keep:
+                    continue
+                is_gk = (det.names.get(cls_id) == 'goalkeeper')
+                frame_dict[box_id + 1] = {
+                    'bbox': box.tolist(),
+                    'is_goalkeeper': is_gk,
+                }
+            pseudo_tracks.append(frame_dict)
+
+        pre_fitted = TeamAssigner()
+        pre_fitted.assign_teams_global(sampled_frames, pseudo_tracks)
+        print("  [pre] Global team-colour model fitted.")
+    else:
+        pre_fitted = None
+        print("  [pre] Could not sample frames — team colours will be fitted per chunk.")
+
+    # ------------------------------------------------------------------
+    # Chunked processing
+    # ------------------------------------------------------------------
+    tmp_dir = tempfile.mkdtemp(prefix='socceranalytics_chunks_')
+    chunk_paths = []
+
+    try:
+        for chunk_idx in range(n_chunks):
+            start = chunk_idx * chunk_size
+            end = min(start + chunk_size, total_frames)
+            print(f"\n  --- Chunk {chunk_idx + 1}/{n_chunks}: frames {start}–{end - 1} ---")
+
+            video_frames = read_video_chunk(video_path, start, end)
+            if not video_frames:
+                print(f"  [warn] No frames decoded for chunk {chunk_idx + 1} — skipping.")
+                continue
+
+            output_frames = _process_chunk(
+                video_frames, tracker, chunk_idx, video_name,
+                pre_fitted_team_assigner=pre_fitted,
+            )
+
+            chunk_path = os.path.join(tmp_dir, f'chunk_{chunk_idx:04d}.mp4')
+            save_video(output_frames, chunk_path)
+            chunk_paths.append(chunk_path)
+            print(f"         Chunk {chunk_idx + 1} saved to '{chunk_path}'.")
+
+        # ------------------------------------------------------------------
+        # Concatenate chunks into the final output
+        # ------------------------------------------------------------------
+        print(f"\n  [concat] Concatenating {len(chunk_paths)} chunk(s) → '{output_path}'...")
+        concatenate_videos(chunk_paths, output_path)
+        print(f"           -> Final video saved to: {output_path}")
+
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def process_video(video_path, tracker, chunk_size=None):
+    """Process a single video through the full analysis pipeline.
+
+    When *chunk_size* is set (or the ``CHUNK_SIZE`` env-var is non-zero) and
+    the video contains more frames than *chunk_size*, processing is delegated
+    to :func:`process_video_chunked` to keep peak memory usage bounded.
+    """
+    # Resolve effective chunk size (explicit arg overrides env-var).
+    effective_chunk_size = chunk_size
+    if effective_chunk_size is None:
+        env_val = os.environ.get('CHUNK_SIZE', '')
+        if env_val.strip().isdigit():
+            effective_chunk_size = int(env_val.strip())
+
+    # Check whether chunking is warranted.
+    if effective_chunk_size and effective_chunk_size > 0:
+        info = get_video_info(video_path)
+        if info['frame_count'] > effective_chunk_size:
+            print(f"\n  [process_video] Video has {info['frame_count']} frames "
+                  f"(> chunk_size={effective_chunk_size}) → using chunked mode.")
+            process_video_chunked(video_path, tracker, effective_chunk_size)
+            return
+
     video_name = os.path.splitext(os.path.basename(video_path))[0]
     output_path = os.path.join('output_videos', os.path.basename(video_path))
     track_stub = os.path.join('stubs', f'{video_name}_track_stubs.pkl')
@@ -429,8 +657,20 @@ def main():
     """Entry point — delegates to the new sn-gamestate-style Pipeline when a
     config file is present, otherwise falls back to the legacy per-function
     flow so existing stubs and behaviour are preserved.
+
+    Set the ``CHUNK_SIZE`` environment variable to a positive integer to enable
+    chunked processing in the legacy path.  Videos whose frame count exceeds
+    that value will be split into chunks of that many frames, processed
+    independently, and their outputs concatenated into the final video.
+    Example::
+
+        CHUNK_SIZE=500 python main.py
     """
     os.makedirs('stubs', exist_ok=True)
+
+    # Read optional chunk size from environment.
+    _env_chunk = os.environ.get('CHUNK_SIZE', '').strip()
+    chunk_size = int(_env_chunk) if _env_chunk.isdigit() and int(_env_chunk) > 0 else None
 
     config_path = 'configs/pipeline.yaml'
     if os.path.exists(config_path):
@@ -451,13 +691,16 @@ def main():
             return
 
         print(f"Found {len(video_files)} video(s) to process: {video_files}")
+        if chunk_size:
+            print(f"Chunked mode enabled: CHUNK_SIZE={chunk_size} frames per chunk.")
 
         tracker = FootballBotSortTracker('models/soccer.onnx', config_path='botsort_football.yaml')
 
         for video_path in video_files:
-            process_video(video_path, tracker)
+            process_video(video_path, tracker, chunk_size=chunk_size)
 
         print("\nAll videos processed successfully.")
+
 
 
 if __name__ == '__main__':
