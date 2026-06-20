@@ -26,11 +26,21 @@ def read_video(video_path):
             "The file may be corrupt or in an unsupported format."
         )
     frames = []
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frames.append(frame)
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frames.append(frame)
+    except MemoryError:
+        cap.release()
+        raise MemoryError(
+            f"Ran out of memory after loading {len(frames)} frames from "
+            f"'{video_path}'. The video is too large to fit in RAM.\n"
+            "  Fix: run with a chunk size so frames are processed in batches:\n"
+            "       python main.py CHUNK_SIZE=500\n"
+            "  or set the environment variable:  CHUNK_SIZE=500"
+        )
     cap.release()
     if not frames:
         raise RuntimeError(
