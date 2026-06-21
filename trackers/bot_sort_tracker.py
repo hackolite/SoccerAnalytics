@@ -105,6 +105,8 @@ class TrackHistory:
     positions: deque = field(default_factory=lambda: deque(maxlen=120))
     #: Appearance embeddings for the last 30 frames
     embeddings: deque = field(default_factory=lambda: deque(maxlen=30))
+    #: HSV color histograms for the last 30 frames (supplementary cue)
+    color_histograms: deque = field(default_factory=lambda: deque(maxlen=30))
     #: Frame index when this track was last observed
     last_seen: int = -1
     #: Most recent bounding box [x1, y1, x2, y2]
@@ -138,6 +140,39 @@ def _bbox_center(bbox: List[float]) -> Tuple[float, float]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Color histogram helpers (supplementary appearance cue)
+# ──────────────────────────────────────────────────────────────────────────────
+_HIST_BINS: int = 16   # bins per channel → 48-dim descriptor
+
+
+def _color_histogram(crop: np.ndarray) -> np.ndarray:
+    """Return a normalised HSV histogram for a BGR player crop.
+
+    Three channels (H, S, V) × ``_HIST_BINS`` bins each → 48-dim vector.
+    Returns a zero vector when the crop is invalid.
+    """
+    if crop is None or crop.size == 0 or crop.shape[0] < 4 or crop.shape[1] < 4:
+        return np.zeros(_HIST_BINS * 3, dtype=np.float32)
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    h_hist = cv2.calcHist([hsv], [0], None, [_HIST_BINS], [0, 180]).flatten()
+    s_hist = cv2.calcHist([hsv], [1], None, [_HIST_BINS], [0, 256]).flatten()
+    v_hist = cv2.calcHist([hsv], [2], None, [_HIST_BINS], [0, 256]).flatten()
+    hist = np.concatenate([h_hist, s_hist, v_hist]).astype(np.float32)
+    total = hist.sum()
+    return hist / (total + 1e-8)
+
+
+def _histogram_similarity(h1: np.ndarray, h2: np.ndarray) -> float:
+    """Bhattacharyya coefficient ∈ [0, 1] between two normalised histograms.
+
+    Returns 0 when one of the inputs is all-zero (uninitialised).
+    """
+    if h1.sum() < 1e-6 or h2.sum() < 1e-6:
+        return 0.0
+    return float(np.sum(np.sqrt(np.abs(h1 * h2))))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Main tracker class
 # ──────────────────────────────────────────────────────────────────────────────
 class FootballBotSortTracker:
@@ -156,7 +191,7 @@ class FootballBotSortTracker:
     """
 
     # Number of frames a lost track is retained
-    MAX_LOST_FRAMES: int = 150
+    MAX_LOST_FRAMES: int = 200
     # Rolling window for velocity estimation
     VEL_WINDOW: int = 10
     # A position jump greater than ``MAX_SPEED_FACTOR × avg_speed`` is flagged
@@ -166,12 +201,13 @@ class FootballBotSortTracker:
     # Number of recent embeddings averaged to form the appearance gallery
     # Larger gallery → more robust against per-frame noise (jersey occlusion,
     # motion blur).  Inspired by SoccerNet winning approaches.
-    GALLERY_SIZE: int = 20
+    GALLERY_SIZE: int = 30
     # Minimum composite score to re-identify a lost player instead of creating
-    # a new stable ID.  Score formula: 0.55*appearance + 0.35*motion + 0.10*iou.
-    # Lowered from 0.35 → 0.22 to make ReID more permissive — players with
-    # similar jersey colours will now be re-associated more easily.
-    REID_MATCH_THRESHOLD: float = 0.22
+    # a new stable ID.  Score formula:
+    #   0.45*appearance + 0.10*color_hist + 0.35*motion + 0.10*iou.
+    # Lowered to 0.15 to be maximally permissive — every detected player
+    # should receive a stable ID rather than be silently dropped.
+    REID_MATCH_THRESHOLD: float = 0.15
     # Hard cap: 10 outfield players per team, no goalkeepers in the pool.
     # Goalkeepers are tracked separately via GK_SLOT_A / GK_SLOT_B.
     MAX_STABLE_IDS: int = 20
@@ -211,41 +247,66 @@ class FootballBotSortTracker:
         self,
         detection_bbox: List[float],
         exclude_ids: set,
+        frame_num: int = -1,
+        allow_any: bool = False,
     ) -> Optional[int]:
         """Return the stable ID whose last known position is nearest the detection.
 
         Used as a last resort when the ID cap is reached and no candidate
-        passes the ReID threshold.  Picks the closest *unoccupied* stable
-        player ID from the position gallery so we never introduce a duplicate.
+        passes the ReID threshold.  Searches the full position history (not
+        just the last bbox) so players that briefly leave the frame are still
+        candidates.  A recency penalty is applied so recently seen players are
+        preferred over stale tracks at the same spatial distance.
 
         Parameters
         ----------
         detection_bbox:
             Bounding box of the unmatched detection [x1, y1, x2, y2].
         exclude_ids:
-            Set of stable IDs that are already claimed in the current frame
-            (must not be reused to avoid duplicates).
+            Set of stable IDs already claimed in the current frame.
+            When *allow_any* is ``True`` this constraint is relaxed and the
+            globally nearest ID is returned regardless.
+        frame_num:
+            Current frame index, used to compute track age for recency scoring.
+        allow_any:
+            When ``True``, ignore *exclude_ids* and return the absolute nearest
+            stable ID from all history.  Use as the final fallback to guarantee
+            every detection receives an ID.
 
         Returns
         -------
-        The best stable ID, or ``None`` when no candidate is available.
+        The best stable ID, or ``None`` when ``player_history`` is empty.
         """
         det_cx = (detection_bbox[0] + detection_bbox[2]) / 2.0
         det_cy = (detection_bbox[1] + detection_bbox[3]) / 2.0
 
         best_id: Optional[int] = None
-        best_dist: float = float('inf')
+        best_score: float = float('inf')
 
         for sid, hist in self.player_history.items():
-            if sid in exclude_ids:
+            if not allow_any and sid in exclude_ids:
                 continue
-            if hist.bbox is None:
+
+            # Use last known bbox centre, or fall back to last recorded position.
+            if hist.bbox is not None:
+                scx = (hist.bbox[0] + hist.bbox[2]) / 2.0
+                scy = (hist.bbox[1] + hist.bbox[3]) / 2.0
+            elif len(hist.positions) > 0:
+                scx, scy = hist.positions[-1]
+            else:
                 continue
-            scx = (hist.bbox[0] + hist.bbox[2]) / 2.0
-            scy = (hist.bbox[1] + hist.bbox[3]) / 2.0
+
             dist = float(np.sqrt((det_cx - scx) ** 2 + (det_cy - scy) ** 2))
-            if dist < best_dist:
-                best_dist = dist
+
+            # Recency penalty: each missed frame adds 0.5 px to effective distance,
+            # so a nearby player seen 10 frames ago (score +5) still beats a player
+            # seen 100 frames ago (score +50) at the same raw distance.
+            if frame_num >= 0 and hist.last_seen >= 0:
+                age = max(0, frame_num - hist.last_seen)
+                dist += age * 0.5
+
+            if dist < best_score:
+                best_score = dist
                 best_id = sid
 
         return best_id
@@ -266,6 +327,20 @@ class FootballBotSortTracker:
         mean = np.mean(gallery, axis=0)
         norm = np.linalg.norm(mean)
         return mean / (norm + 1e-8)
+
+    def _mean_histogram(self, track_id: int) -> np.ndarray:
+        """Return the mean of the stored HSV color histograms for *track_id*.
+
+        Used as a fast, lighting-robust supplementary appearance cue alongside
+        the deep ReID embedding.
+        """
+        hist = self.player_history.get(track_id)
+        if hist is None or len(hist.color_histograms) == 0:
+            return np.zeros(_HIST_BINS * 3, dtype=np.float32)
+        gallery = list(hist.color_histograms)[-self.GALLERY_SIZE:]
+        mean = np.mean(gallery, axis=0)
+        total = mean.sum()
+        return mean / (total + 1e-8)
 
     # ── Velocity helpers ──────────────────────────────────────────────────────
 
@@ -332,22 +407,23 @@ class FootballBotSortTracker:
         detection_embedding: np.ndarray,
         active_tracks: Dict[int, TrackHistory],
         frame_num: int = 0,
+        detection_histogram: Optional[np.ndarray] = None,
     ) -> Tuple[Optional[int], float]:
         """Find the best matching active track for a new detection.
 
         Scoring formula::
 
-            score = 0.6 × appearance_similarity
-                  + 0.3 × motion_similarity
-                  + 0.1 × bbox_similarity
+            score = 0.45 × appearance_similarity
+                  + 0.10 × color_histogram_similarity
+                  + 0.35 × motion_similarity
+                  + 0.10 × bbox_similarity
 
         A **hard spatial gate** is applied first: if the distance between the
-        detection and a candidate's last known position exceeds
-        ``ABS_MAX_SPEED × temporal_gap`` (in frames), that candidate is
-        unconditionally rejected regardless of appearance.  This prevents the
-        classic ID-switch where a player reappears with a new raw track ID and
-        is incorrectly re-identified with a player that was last seen in a
-        completely different area of the pitch.
+        detection and a candidate's predicted position (extrapolated from
+        recent velocity) exceeds ``ABS_MAX_SPEED × temporal_gap`` (in frames),
+        that candidate is unconditionally rejected.  Velocity-based prediction
+        makes the gate robust to brief occlusions where the player has moved
+        but the tracker lost them for a few frames.
 
         Parameters
         ----------
@@ -361,6 +437,9 @@ class FootballBotSortTracker:
             Current frame index, used together with ``hist.last_seen`` to
             compute the temporal gap and the maximum physically plausible
             displacement since the track was last observed.
+        detection_histogram:
+            Optional normalised HSV histogram for the detection.  When
+            provided, a Bhattacharyya coefficient is included in the score.
 
         Returns
         -------
@@ -375,38 +454,63 @@ class FootballBotSortTracker:
             if hist.bbox is None:
                 continue
 
-            # ── 0. Hard spatial gate ──────────────────────────────────────
-            # Compute the temporal gap (frames) since this track was last seen.
+            # ── 0. Velocity-based position prediction + hard spatial gate ──
             gap = max(1, frame_num - hist.last_seen) if hist.last_seen >= 0 else 1
             max_possible_dist = self.ABS_MAX_SPEED * gap
 
             prev_center = _bbox_center(hist.bbox)
-            dist = float(np.sqrt(
+            raw_dist = float(np.sqrt(
                 (det_center[0] - prev_center[0]) ** 2 +
                 (det_center[1] - prev_center[1]) ** 2
             ))
 
-            # Reject candidate if jump is physically impossible given elapsed time
+            # Extrapolate position from the last two recorded positions.
+            predicted_center = prev_center
+            if len(hist.positions) >= 2:
+                p_last = hist.positions[-1]
+                p_prev = hist.positions[-2]
+                vx = p_last[0] - p_prev[0]
+                vy = p_last[1] - p_prev[1]
+                predicted_center = (
+                    p_last[0] + vx * gap,
+                    p_last[1] + vy * gap,
+                )
+
+            pred_dist = float(np.sqrt(
+                (det_center[0] - predicted_center[0]) ** 2 +
+                (det_center[1] - predicted_center[1]) ** 2
+            ))
+
+            # Use the optimistic distance (min of raw vs. predicted) for the gate.
+            dist = min(raw_dist, pred_dist)
+
             if dist > max_possible_dist:
                 continue
 
-            # 1. Appearance similarity (cosine distance in embedding space)
+            # 1. Deep appearance similarity (cosine distance in embedding space)
             gallery_emb = self._mean_embedding(tid)
             app_sim = _cosine_similarity(detection_embedding, gallery_emb)
 
-            # 2. Motion similarity: penalise large spatial jumps relative to
+            # 2. Color histogram similarity (Bhattacharyya coefficient)
+            if detection_histogram is not None:
+                gallery_hist = self._mean_histogram(tid)
+                color_sim = _histogram_similarity(detection_histogram, gallery_hist)
+            else:
+                color_sim = 0.0
+
+            # 3. Motion similarity: penalise large spatial jumps relative to
             #    the player's estimated speed scaled by the temporal gap.
             avg_speed = self._estimate_velocity(tid)
             ref_speed = (avg_speed * self.MAX_SPEED_FACTOR
                          if avg_speed > 0 else self.ABS_MAX_SPEED)
             motion_sim = max(0.0, 1.0 - dist / (ref_speed * gap + 1e-8))
 
-            # 3. Bounding-box overlap
+            # 4. Bounding-box overlap
             bbox_sim = _bbox_iou(detection_bbox, hist.bbox)
 
-            # SoccerNet-inspired weight mix: reduce pure-appearance dominance
-            # (jerseys of the same team look alike) and increase spatial weight.
-            score = (0.55 * app_sim +
+            # SOTA weight mix: appearance + color histogram + spatial + iou.
+            score = (0.45 * app_sim +
+                     0.10 * color_sim +
                      0.35 * motion_sim +
                      0.10 * bbox_sim)
 
@@ -462,6 +566,7 @@ class FootballBotSortTracker:
             crop = self._extract_crop(frame, bbox)
             emb = self.reid.extract(crop)
             hist.embeddings.append(emb)
+            hist.color_histograms.append(_color_histogram(crop))
             hist.positions.append(pos)
             hist.last_seen = frame_id
             hist.bbox = bbox
@@ -616,26 +721,45 @@ class FootballBotSortTracker:
 
                 # ── Outfield-player path: full ReID + stable ID ──────────
                 if cls_name == 'player' and raw_id >= 0:
+                    crop = self._extract_crop(frames[frame_num], bbox)
+                    det_emb = self.reid.extract(crop)
+                    det_hist_vec = _color_histogram(crop)
+
                     if raw_id in self._id_map:
                         stable_id = self._id_map[raw_id]
                         # Guard: if this stable_id was already claimed this frame
-                        # by a different raw ID, try to find a free slot.  When no
-                        # free slot is available (cap reached), skip this detection
-                        # entirely to avoid assigning the same ID to two players in
-                        # the same frame.
+                        # by a different raw ID, try to find a free slot via ReID
+                        # or zone fallback so the detection is never silently dropped.
                         if stable_id in current_stable_ids:
                             if self._next_stable_id <= self.MAX_STABLE_IDS:
                                 stable_id = self._next_stable_id
                                 self._next_stable_id += 1
                                 self._id_map[raw_id] = stable_id
                             else:
-                                # No free slot — omit rather than duplicate
-                                logger.warning(
-                                    "ID cap reached, duplicate suppressed: "
-                                    "raw=%d → stable=%d already in use this frame",
-                                    raw_id, stable_id,
+                                # Cap reached — try zone fallback first, then
+                                # force the globally nearest ID as last resort so
+                                # every detection always receives an ID.
+                                zone_id = self._zone_fallback_id(
+                                    bbox, current_stable_ids, frame_num=frame_num,
                                 )
-                                continue
+                                if zone_id is None:
+                                    zone_id = self._zone_fallback_id(
+                                        bbox, set(), frame_num=frame_num,
+                                        allow_any=True,
+                                    )
+                                if zone_id is not None:
+                                    stable_id = zone_id
+                                    self._id_map[raw_id] = stable_id
+                                    logger.info(
+                                        "Duplicate resolved via zone history: "
+                                        "raw=%d → stable=%d",
+                                        raw_id, stable_id,
+                                    )
+                                else:
+                                    # player_history is completely empty — new video start
+                                    stable_id = self._next_stable_id
+                                    self._next_stable_id += 1
+                                    self._id_map[raw_id] = stable_id
                     else:
                         # New raw ID — try to re-identify a lost player from
                         # the appearance / position history.
@@ -649,10 +773,10 @@ class FootballBotSortTracker:
                         cap_reached = self._next_stable_id > self.MAX_STABLE_IDS
 
                         if lost_tracks:
-                            crop = self._extract_crop(frames[frame_num], bbox)
-                            emb = self.reid.extract(crop)
                             best_id, best_score = self.match_player(
-                                bbox, emb, lost_tracks, frame_num=frame_num,
+                                bbox, det_emb, lost_tracks,
+                                frame_num=frame_num,
+                                detection_histogram=det_hist_vec,
                             )
                         else:
                             best_id, best_score = None, -1.0
@@ -675,24 +799,29 @@ class FootballBotSortTracker:
                                 )
                         elif cap_reached:
                             # No re-id candidate above threshold and cap reached.
-                            # Fall back to zone-based assignment: pick the stable ID
-                            # whose last known position is closest to this detection,
-                            # provided it is not already used in this frame (no duplicate).
-                            zone_id = self._zone_fallback_id(bbox, current_stable_ids)
+                            # Search history for the last player seen in this zone,
+                            # preferring unclaimed IDs.  As a final safeguard, if
+                            # all IDs are already claimed this frame the globally
+                            # nearest one is reused so no detection is ever dropped.
+                            zone_id = self._zone_fallback_id(
+                                bbox, current_stable_ids, frame_num=frame_num,
+                            )
+                            if zone_id is None:
+                                zone_id = self._zone_fallback_id(
+                                    bbox, set(), frame_num=frame_num,
+                                    allow_any=True,
+                                )
                             if zone_id is not None:
                                 stable_id = zone_id
                                 logger.info(
-                                    "Zone fallback: raw=%d → stable=%d "
-                                    "(nearest lost player in area)",
+                                    "Zone history fallback: raw=%d → stable=%d "
+                                    "(last player seen in area)",
                                     raw_id, stable_id,
                                 )
                             else:
-                                logger.warning(
-                                    "ID cap reached with no zone candidate — "
-                                    "suppressing raw=%d",
-                                    raw_id,
-                                )
-                                continue
+                                # No history at all — fresh video start, just allocate
+                                stable_id = self._next_stable_id
+                                self._next_stable_id += 1
                         else:
                             stable_id = self._next_stable_id
                             self._next_stable_id += 1
@@ -921,7 +1050,12 @@ class FootballBotSortTracker:
 
             for track_id, player in player_dict.items():
                 color = player.get("team_color", (0, 0, 255))
-                display_id = player.get('team_player_id', track_id)
+                # Goalkeepers always display as '0' regardless of whether
+                # assign_team_player_ids has been called yet.
+                if player.get('is_goalkeeper', False) or track_id in (self.GK_SLOT_A, self.GK_SLOT_B):
+                    display_id = '0'
+                else:
+                    display_id = player.get('team_player_id', track_id)
                 frame = self.draw_ellipse(frame, player["bbox"], color, display_id)
                 if player.get('has_ball', False):
                     frame = self.draw_traingle(frame, player["bbox"], (0, 0, 255))
