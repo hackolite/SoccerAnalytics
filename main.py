@@ -66,19 +66,15 @@ def assign_team_player_ids(tracks):
     for player_id, votes in player_team_votes.items():
         player_teams[player_id] = max(votes, key=votes.get)
 
-    # --- Assign goalkeeper IDs first ('0'), one per team ---
-    # Goalkeepers are excluded from the outfield 10-player pool so they
-    # never displace an outfield player ID.  All goalkeepers receive the
-    # special ID '0' regardless of which team they belong to.
+    # --- Assign goalkeeper IDs first ('0') ---
+    # Every player flagged as a goalkeeper receives the special display ID '0'.
+    # The per-team uniqueness constraint is intentionally removed: the tracker
+    # already ensures at most two GK slots exist (GK_SLOT_A / GK_SLOT_B) so
+    # there is no risk of assigning '0' to more players than expected.
     team_player_id_map = {}
-    gk_assigned_teams: set = set()  # tracks which teams already have a GK ID
 
     for player_id in sorted(goalkeeper_ids, key=lambda p: first_frame.get(p, 0)):
-        team = player_teams.get(player_id)
-        if team is None or team in gk_assigned_teams:
-            continue
         team_player_id_map[player_id] = '0'
-        gk_assigned_teams.add(team)
 
     # --- Assign fresh IDs to the first 10 unique outfield players per team ---
     team_counters = {1: 0, 2: 0}
